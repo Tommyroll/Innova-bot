@@ -1,33 +1,31 @@
-
 import os
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
-# Function to start the bot
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('Привет! Я ваш тестовый бот.')
+# Функция для обработки команды /start
+async def start(update: Update, context) -> None:
+    await update.message.reply_text("Привет! Я ваш тестовый бот.")
 
-# Function to handle messages
-def echo(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text('Привет!')
+# Функция для обработки всех текстовых сообщений
+async def echo(update: Update, context) -> None:
+    await update.message.reply_text(update.message.text)
 
 def main():
-    # Get the bot token from environment variables
+    # Получаем токен из переменных окружения
     token = os.getenv("BOT_TOKEN")
     if not token:
         print("Ошибка: BOT_TOKEN не найден. Добавьте его в переменные окружения.")
         return
 
-    updater = Updater(token)
+    # Создаём приложение
+    app = ApplicationBuilder().token(token).build()
 
-    # Register handlers
-    dispatcher = updater.dispatcher
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, echo))
+    # Регистрируем обработчики
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-    # Start the bot
-    updater.start_polling()
-    updater.idle()
+    # Запускаем бота
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
