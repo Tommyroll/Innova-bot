@@ -2,7 +2,7 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-import openai  # Для работы с OpenAI API
+import openai
 
 # Настраиваем логирование
 logging.basicConfig(
@@ -11,45 +11,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация OpenAI API
+# Установите ваш OpenAI API-ключ
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Функция для обработки команды /start
 async def start(update: Update, context) -> None:
     logger.info("Команда /start вызвана")
-    await update.message.reply_text("Привет! Я ваш помощник. Спросите меня о лабораторных анализах или других услугах!")
+    await update.message.reply_text("Привет! Я ваш бот, готов помочь!")
 
-# Функция для обработки всех текстовых сообщений
+# Функция для обработки текстовых сообщений
 async def handle_message(update: Update, context) -> None:
-    user_input = update.message.text
-    logger.info(f"Получено сообщение: {user_input}")
+    user_message = update.message.text
+    logger.info(f"Получено сообщение: {user_message}")
 
-    # Запрос в OpenAI API
     try:
-        response = openai.Completion.create(
-            model="gpt-4o-mini",
-            prompt=f"Формально ответь на вопрос: {user_input}. Если это не связано с услугами лаборатории, извинись и откажись отвечать.",
-            max_tokens=150,
-            temperature=0.5,
+        # Отправляем запрос к OpenAI API
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_message}
+            ]
         )
-        answer = response.choices[0].text.strip()
-        logger.info(f"Ответ бота: {answer}")
-        await update.message.reply_text(answer)
+        reply = response['choices'][0]['message']['content']
+        await update.message.reply_text(reply)
+
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenAI API: {e}")
         await update.message.reply_text("Извините, произошла ошибка. Попробуйте позже.")
 
 def main():
-    # Получаем токен Telegram из переменных окружения
+    # Получаем токен Telegram бота
     telegram_token = os.getenv("BOT_TOKEN")
     if not telegram_token:
         logger.error("Ошибка: BOT_TOKEN не найден. Добавьте его в переменные окружения.")
-        return
-
-    # Проверяем наличие API-ключа OpenAI
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        logger.error("Ошибка: OPENAI_API_KEY не найден. Добавьте его в переменные окружения.")
         return
 
     # Создаём приложение
