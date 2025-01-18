@@ -32,7 +32,7 @@ async def handle_message(update: Update, context) -> None:
     try:
         # Отправляем запрос к OpenAI API
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Используем доступную модель
+            model="gpt-4o-mini",  # Используем модель GPT-4o Mini
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": user_message}
