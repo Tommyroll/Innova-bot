@@ -1,8 +1,11 @@
 import os
 import logging
+import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 import openai
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Настраиваем логирование
 logging.basicConfig(
@@ -19,6 +22,32 @@ if not openai_api_key:
 
 openai.api_key = openai_api_key
 
+# Настройка для работы с Google Sheets
+SPREADSHEET_ID = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"  # ID Google Sheets
+
+def get_data_from_sheets():
+    try:
+        # Загружаем ключи из переменной окружения
+        sheets_credentials = os.getenv("GOOGLE_SHEETS_KEY")
+        if not sheets_credentials:
+            raise ValueError("GOOGLE_SHEETS_KEY не найден в переменных окружения.")
+        
+        credentials_info = json.loads(sheets_credentials)
+        credentials = Credentials.from_service_account_info(
+            credentials_info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+
+        # Подключаемся к Google Sheets
+        client = gspread.authorize(credentials)
+        sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+        data = sheet.get_all_records()  # Чтение всех записей
+        return data
+
+    except Exception as e:
+        logger.error(f"Ошибка при подключении к Google Sheets: {e}")
+        return None
+
 # Функция для обработки команды /start
 async def start(update: Update, context) -> None:
     logger.info("Команда /start вызвана")
@@ -30,26 +59,20 @@ async def handle_message(update: Update, context) -> None:
     logger.info(f"Получено сообщение: {user_message}")
 
     try:
-        # Отправляем запрос к OpenAI API
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # Используем модель GPT-4o Mini
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": user_message}
-            ]
-        )
-        reply = response['choices'][0]['message']['content']
-        logger.info(f"Ответ от OpenAI: {reply}")
-        await update.message.reply_text(reply)
+        # Пример использования данных из Google Sheets
+        data = get_data_from_sheets()
+        if data:
+            response_text = "Вот данные из Google Sheets:\n"
+            for item in data:
+                response_text += f"- {item['Название анализа']}: {item['Цена']} тенге\n"
+        else:
+            response_text = "Не удалось получить данные из Google Sheets."
 
-    except openai.error.OpenAIError as e:
-        logger.error(f"Ошибка OpenAI API: {e}")
-        await update.message.reply_text(
-            "Извините, произошла ошибка при запросе к OpenAI API. Проверьте конфигурацию."
-        )
+        # Отправляем ответ пользователю
+        await update.message.reply_text(response_text)
 
     except Exception as e:
-        logger.error(f"Неизвестная ошибка: {e}")
+        logger.error(f"Ошибка при обработке сообщения: {e}")
         await update.message.reply_text("Извините, произошла ошибка. Попробуйте позже.")
 
 def main():
@@ -57,14 +80,6 @@ def main():
     telegram_token = os.getenv("BOT_TOKEN")
     if not telegram_token:
         logger.error("Ошибка: BOT_TOKEN не найден. Добавьте его в переменные окружения.")
-        return
-
-    # Проверяем библиотеку openai
-    try:
-        import openai
-        logger.info(f"Используется версия библиотеки openai: {openai.__version__}")
-    except ImportError:
-        logger.error("Библиотека openai не установлена. Установите её: pip install openai")
         return
 
     # Создаём приложение
