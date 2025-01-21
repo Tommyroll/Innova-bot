@@ -108,16 +108,16 @@ def check_google_sheets_key():
     try:
         key = os.getenv("GOOGLE_SHEETS_KEY")
         if not key:
-            print("GOOGLE_SHEETS_KEY не найден.")
+            logger.error("GOOGLE_SHEETS_KEY не найден.")
             return
         
         # Декодируем JSON
         credentials = json.loads(key)
-        print("JSON-ключ корректный. Вот email ключа:", credentials.get("client_email"))
+        logger.info(f"JSON-ключ корректный. Вот email ключа: {credentials.get('client_email')}")
     except json.JSONDecodeError as e:
-        print("Ошибка: JSON-ключ некорректен!", e)
+        logger.error(f"Ошибка: JSON-ключ некорректен! {e}")
     except Exception as e:
-        print("Произошла ошибка при проверке ключа:", e)
+        logger.error(f"Произошла ошибка при проверке ключа: {e}")
 
 # Вызов функции проверки
 check_google_sheets_key()
