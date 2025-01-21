@@ -27,6 +27,7 @@ SPREADSHEET_ID = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"  # ID Google She
 
 def get_data_from_sheets():
     try:
+        logger.info("Подключение к Google Sheets...")
         # Загружаем ключи из переменной окружения
         sheets_credentials = os.getenv("GOOGLE_SHEETS_KEY")
         if not sheets_credentials:
@@ -40,8 +41,11 @@ def get_data_from_sheets():
 
         # Подключаемся к Google Sheets
         client = gspread.authorize(credentials)
+        logger.info("Авторизация в Google Sheets прошла успешно.")
         sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+        logger.info("Таблица найдена. Чтение данных...")
         data = sheet.get_all_records()  # Чтение всех записей
+        logger.info(f"Данные успешно получены: {data}")
         return data
 
     except Exception as e:
@@ -64,7 +68,7 @@ async def handle_message(update: Update, context) -> None:
         if data:
             response_text = "Вот данные из Google Sheets:\n"
             for item in data:
-                response_text += f"- {item['Название анализа']}: {item['Цена']} тенге\n"
+                response_text += f"- {item.get('Название анализа', 'Не указано')}: {item.get('Цена', 'Не указана')} тенге\n"
         else:
             response_text = "Не удалось получить данные из Google Sheets."
 
