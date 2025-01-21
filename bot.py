@@ -9,115 +9,86 @@ from google.oauth2.service_account import Credentials
 
 # Настраиваем логирование
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Проверяем наличие OpenAI API-ключа
+# Проверка и настройка OpenAI API
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
-    logger.error("Ошибка: OPENAI_API_KEY не найден. Добавьте его в переменные окружения.")
+    logger.error("Ошибка: OPENAI_API_KEY не найден.")
     exit(1)
-
 openai.api_key = openai_api_key
 
-# Настройка для работы с Google Sheets
-SPREADSHEET_ID = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"  # ID Google Sheets
+# Настройка Google Sheets
+SPREADSHEET_ID = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
 
-def get_data_from_sheets():
+def fetch_sheets_data():
+    """Получение данных из Google Sheets."""
     try:
-        logger.info("Подключение к Google Sheets...")
-        # Загружаем ключи из переменной окружения
         sheets_credentials = os.getenv("GOOGLE_SHEETS_KEY")
         if not sheets_credentials:
-            raise ValueError("GOOGLE_SHEETS_KEY не найден в переменных окружения.")
+            raise ValueError("GOOGLE_SHEETS_KEY не найден.")
         
         credentials_info = json.loads(sheets_credentials)
         credentials = Credentials.from_service_account_info(
             credentials_info,
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
-
-        # Подключаемся к Google Sheets
         client = gspread.authorize(credentials)
-        logger.info("Авторизация в Google Sheets прошла успешно.")
         sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-        logger.info("Таблица найдена. Чтение данных...")
-        data = sheet.get_all_records()  # Чтение всех записей
-        logger.info(f"Данные успешно получены: {data}")
+        data = sheet.get_all_records()
+        logger.info("Данные успешно получены из Google Sheets.")
         return data
-
     except Exception as e:
-        logger.error(f"Ошибка при подключении к Google Sheets: {e}")
+        logger.error(f"Ошибка при получении данных из Google Sheets: {e}")
         return None
 
-# Функция для обработки команды /start
-async def start(update: Update, context) -> None:
-    logger.info("Команда /start вызвана")
-    await update.message.reply_text("Привет! Я ваш бот, готов помочь!")
+# Команда /start
+async def start(update: Update, context):
+    await update.message.reply_text("Привет! Я бот для обработки данных лаборатории. Введите запрос или используйте /help для помощи.")
 
-# Функция для обработки текстовых сообщений
-async def handle_message(update: Update, context) -> None:
+# Команда /help
+async def help_command(update: Update, context):
+    await update.message.reply_text(
+        "Доступные команды:\n"
+        "/start - Запуск бота\n"
+        "/help - Показать это сообщение\n"
+        "Просто отправьте сообщение, чтобы узнать о доступных анализах."
+    )
+
+# Обработка текстовых сообщений
+async def handle_message(update: Update, context):
     user_message = update.message.text
     logger.info(f"Получено сообщение: {user_message}")
-
+    
     try:
-        # Пример использования данных из Google Sheets
-        data = get_data_from_sheets()
+        data = fetch_sheets_data()
         if data:
-            response_text = "Вот данные из Google Sheets:\n"
-            for item in data:
-                response_text += f"- {item.get('Название анализа', 'Не указано')}: {item.get('Цена', 'Не указана')} тенге\n"
+            response_text = "Доступные анализы и цены:\n"
+            for row in data:
+                response_text += f"{row.get('Название анализа', 'Не указано')}: {row.get('Цена', 'Не указано')} тенге\n"
         else:
             response_text = "Не удалось получить данные из Google Sheets."
-
-        # Отправляем ответ пользователю
         await update.message.reply_text(response_text)
-
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
-        await update.message.reply_text("Извините, произошла ошибка. Попробуйте позже.")
+        await update.message.reply_text("Произошла ошибка. Попробуйте позже.")
 
 def main():
-    # Получаем токен Telegram бота
     telegram_token = os.getenv("BOT_TOKEN")
     if not telegram_token:
-        logger.error("Ошибка: BOT_TOKEN не найден. Добавьте его в переменные окружения.")
+        logger.error("Ошибка: BOT_TOKEN не найден.")
         return
-
-    # Создаём приложение
+    
     app = ApplicationBuilder().token(telegram_token).build()
-
-    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("Бот запущен и ожидает команды...")
-    # Запускаем бота
+    
+    logger.info("Бот запущен.")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
-# Функция проверки ключа
-import json
-import os
-
-def check_google_sheets_key():
-    try:
-        key = os.getenv("GOOGLE_SHEETS_KEY")
-        if not key:
-            logger.error("GOOGLE_SHEETS_KEY не найден.")
-            return
-        
-        # Декодируем JSON
-        credentials = json.loads(key)
-        logger.info(f"JSON-ключ корректный. Вот email ключа: {credentials.get('client_email')}")
-    except json.JSONDecodeError as e:
-        logger.error(f"Ошибка: JSON-ключ некорректен! {e}")
-    except Exception as e:
-        logger.error(f"Произошла ошибка при проверке ключа: {e}")
-
-# Вызов функции проверки
-check_google_sheets_key()
