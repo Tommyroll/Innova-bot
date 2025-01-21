@@ -6,7 +6,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 import openai
 import gspread
 from google.oauth2.service_account import Credentials
-from google.cloud import vision  # Для OCR распознавания
+from google.cloud import vision
 import re
 
 # Настраиваем логирование
@@ -55,6 +55,14 @@ def match_analysis(query, data):
         if query.lower() in analysis_name:  # Простой поиск по названию
             results.append(row)
     return results
+
+# Обработка команды /start
+async def start(update: Update, context):
+    await update.message.reply_text("Добро пожаловать! Отправьте текст или изображение направления, чтобы получить информацию об анализах.")
+
+# Обработка команды /help
+async def help_command(update: Update, context):
+    await update.message.reply_text("Отправьте текст или фото направления, чтобы получить информацию о доступных анализах и ценах.")
 
 # Обработка текстового запроса
 async def handle_text_request(update: Update, context):
