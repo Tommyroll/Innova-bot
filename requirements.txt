@@ -1,5 +1,6 @@
 google-cloud-vision
 gspread
 google-auth
+google-api-python-client
 python-telegram-bot==20.3
 openai==0.27.8
