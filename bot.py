@@ -45,7 +45,7 @@ def fetch_sheets_data():
 def gpt_response(prompt):
     try:
         response = openai.Completion.create(
-            model="text-davinci-003",
+            model="GPT-4o-mini",
             prompt=prompt,
             max_tokens=200,
             temperature=0.5
