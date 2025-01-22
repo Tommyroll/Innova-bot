@@ -1,95 +1,99 @@
-import os
 import logging
+import os
+import openai
 import json
+from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-import openai
-import gspread
-from google.oauth2.service_account import Credentials
-import re
 
 # Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=os.getenv("LOG_LEVEL", "INFO"),
 )
 logger = logging.getLogger(__name__)
 
-# Настройка API OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Получение переменных окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-# Настройка Google Sheets
-SPREADSHEET_ID = "ВАШ_SPREADSHEET_ID"
+# Инициализация OpenAI
+openai.api_key = OPENAI_API_KEY
 
-# Основная информация о лаборатории
-ADDRESS = "г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход при аптеке 888 PHARM"
-ADDRESS_LINK = "https://go.2gis.com/wz9gi"
-WORKING_HOURS = "Мы работаем ежедневно с 07:00 до 17:00."
-
-# Функция загрузки данных из Google Sheets
-def fetch_sheets_data():
+# Настройка Google Sheets API
+def get_google_sheets_service():
     try:
-        sheets_credentials = os.getenv("GOOGLE_SHEETS_KEY")
-        credentials_info = json.loads(sheets_credentials)
-        credentials = Credentials.from_service_account_info(
-            credentials_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        client = gspread.authorize(credentials)
-        sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-        return sheet.get_all_records()
+        credentials = Credentials.from_service_account_info(json.loads(SERVICE_ACCOUNT_JSON))
+        service = build("sheets", "v4", credentials=credentials)
+        return service
     except Exception as e:
-        logger.error(f"Ошибка при подключении к Google Sheets: {e}")
-        return []
+        logger.error(f"Ошибка настройки Google Sheets: {e}")
+        return None
 
-# GPT для анализа запросов
-def gpt_response(prompt):
+# Чтение данных из Google Sheets
+def read_from_sheets(spreadsheet_id, sheet_range):
+    try:
+        service = get_google_sheets_service()
+        if service:
+            sheet = service.spreadsheets()
+            result = sheet.values().get(spreadsheetId=spreadsheet_id, range=sheet_range).execute()
+            return result.get("values", [])
+    except Exception as e:
+        logger.error(f"Ошибка чтения Google Sheets: {e}")
+    return []
+
+# Обработка запросов через OpenAI
+def ask_openai(prompt):
     try:
         response = openai.Completion.create(
-            model="GPT-4o-mini",
+            model="gpt-4",
             prompt=prompt,
-            max_tokens=200,
-            temperature=0.5
+            max_tokens=150,
+            temperature=0.7,
         )
         return response.choices[0].text.strip()
     except Exception as e:
-        logger.error(f"Ошибка OpenAI GPT: {e}")
-        return "Извините, произошла ошибка при обработке вашего запроса."
+        logger.error(f"Ошибка OpenAI: {e}")
+        return "Извините, я не смог обработать ваш запрос."
 
-# Обработка запросов
-async def handle_request(update: Update, context):
+# Обработчик команды /start
+async def start(update: Update, context):
+    await update.message.reply_text(
+        "Добро пожаловать! Я виртуальный ассистент лаборатории. Чем могу помочь?"
+    )
+
+# Обработчик сообщений
+async def handle_message(update: Update, context):
     user_message = update.message.text
     logger.info(f"Получен запрос: {user_message}")
 
-    # Проверяем, содержит ли запрос ключевые слова
-    data = fetch_sheets_data()
-    relevant_data = [row for row in data if user_message.lower() in row['Название анализа'].lower()]
-
-    if relevant_data:
-        # Формируем ответ
-        response = "Мы нашли следующие анализы:\n"
-        for row in relevant_data:
-            response += f"- {row['Название анализа']}: {row['Цена']} тенге\n"
+    # Простые ключевые слова
+    if "анализ" in user_message.lower():
+        spreadsheet_id = "ваш_ID_таблицы"
+        sheet_range = "Лист1!A1:B10"
+        data = read_from_sheets(spreadsheet_id, sheet_range)
+        if data:
+            response = "Вот список доступных анализов:\n"
+            response += "\n".join([f"- {row[0]}: {row[1]} тг" for row in data])
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("Извините, не удалось получить данные об анализах.")
     else:
-        # GPT для уточнений
-        prompt = (
-            f"Вы ассистент лаборатории. Ответьте на вопрос клиента строго в рамках лаборатории. "
-            f"Если вопрос не по теме, вежливо откажитесь. Вопрос: {user_message}"
-        )
-        response = gpt_response(prompt)
-    
-    await update.message.reply_text(response)
+        ai_response = ask_openai(user_message)
+        if "не могу ответить" in ai_response.lower():
+            await update.message.reply_text("Извините, я не могу обработать ваш запрос. Передаю оператору.")
+        else:
+            await update.message.reply_text(ai_response)
 
-# Запуск бота
+# Основная функция
 def main():
-    application = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_request))
-
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
-    application.run_polling()
-
-async def start(update: Update, context):
-    await update.message.reply_text("Добро пожаловать в нашу лабораторию! Чем могу помочь?")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
