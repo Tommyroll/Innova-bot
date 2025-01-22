@@ -44,19 +44,23 @@ def read_from_sheets(spreadsheet_id, sheet_range):
         logger.error(f"Ошибка чтения Google Sheets: {e}")
     return []
 
-# Обработка запросов через OpenAI
+# Обработка запросов через OpenAI с использованием gpt-4-turbo
 def ask_openai(prompt):
     try:
-        response = openai.Completion.create(
-            model="gpt-4",
-            prompt=prompt,
+        response = openai.ChatCompletion.create(
+            model="gpt-4-turbo",
+            messages=[
+                {"role": "system", "content": "Ты дружелюбный помощник лаборатории."},
+                {"role": "user", "content": prompt},
+            ],
             max_tokens=150,
             temperature=0.7,
         )
-        return response.choices[0].text.strip()
+        return response['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
+
 
 # Обработчик команды /start
 async def start(update: Update, context):
