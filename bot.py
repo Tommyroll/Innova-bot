@@ -1,13 +1,10 @@
 import os
 import logging
 import json
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-import openai
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import gspread
 from google.oauth2.service_account import Credentials
-from google.cloud import vision
-import re
 
 # Настраиваем логирование
 logging.basicConfig(
@@ -15,13 +12,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# Настройка OpenAI API
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    logger.error("Ошибка: OPENAI_API_KEY не найден.")
-    exit(1)
-openai.api_key = openai_api_key
 
 # Настройка Google Sheets
 SPREADSHEET_ID = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
@@ -281,8 +271,11 @@ ANALYSIS_SYNONYMS = {
 
 # Основная информация о компании
 ADDRESS = "г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход при аптеке 888 PHARM"
-ADDRESS_LINK = "https://go.2gis.com/wz9gi"
 WORKING_HOURS = "Мы работаем ежедневно с 07:00 до 17:00."
+
+# Хранение состояния уточняющих вопросов
+user_states = {}
+
 
 def fetch_sheets_data():
     """Получение данных из Google Sheets."""
@@ -305,6 +298,7 @@ def fetch_sheets_data():
         logger.error(f"Ошибка при получении данных из Google Sheets: {e}")
         return None
 
+
 def normalize_query(query):
     """Приведение запроса к стандартной форме с учетом синонимов."""
     query = query.lower().strip()
@@ -313,80 +307,86 @@ def normalize_query(query):
             return key
     return query
 
-def match_analysis(query, data):
-    """Сопоставляет запрос клиента с базой анализов."""
+
+def find_similar_analyses(query, data):
+    """Поиск анализов, содержащих текст запроса."""
     query = normalize_query(query)
-    results = []
+    similar = []
     for row in data:
-        analysis_name = row.get('Название анализа', '').lower()
-        if query in analysis_name:  # Поиск по нормализованному названию
-            results.append(row)
-    return results
+        analysis_name = row.get("Название анализа", "").lower()
+        if query in analysis_name:
+            similar.append(row)
+    return similar
 
-# Ответы на часто задаваемые вопросы
-async def handle_faq(update: Update, context):
-    user_message = update.message.text.lower()
 
-    if "привет" in user_message or "сәлем" in user_message:
-        await update.message.reply_text("Здравствуйте! Чем могу помочь?")
-    elif "адрес" in user_message:
-        await update.message.reply_text(f"Наш адрес: {ADDRESS}\nСсылка на 2ГИС: {ADDRESS_LINK}")
-    elif "режим работы" in user_message or "график" in user_message:
-        await update.message.reply_text(WORKING_HOURS)
-    elif "подготовка" in user_message:
-        await update.message.reply_text(
-            "Общие рекомендации:\n"
-            "1. Не ешьте за 8-12 часов до сдачи крови.\n"
-            "2. Избегайте физических нагрузок за день до анализа.\n"
-            "3. Сообщите врачу о принимаемых лекарствах."
-        )
-    else:
-        await handle_text_request(update, context)
+async def ask_for_clarification(update, query, options):
+    """Задает уточняющий вопрос клиенту."""
+    user_id = update.effective_user.id
+    user_states[user_id] = query
+    keyboard = [[option] for option in options]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "Уточните, пожалуйста, какой из следующих анализов вы имели в виду:",
+        reply_markup=reply_markup
+    )
 
-# Обработка текстового запроса
-async def handle_text_request(update: Update, context):
+
+async def handle_text_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
-    logger.info(f"Получено сообщение: {user_message}")
-    
-    try:
+    user_id = update.effective_user.id
+
+    if user_id in user_states:
+        original_query = user_states.pop(user_id)
+        query = normalize_query(user_message)
         data = fetch_sheets_data()
+
         if data:
-            matched_results = match_analysis(user_message, data)
+            matched_results = find_similar_analyses(query, data)
             if matched_results:
                 response_text = "Найденные анализы:\n"
                 for row in matched_results:
                     response_text += f"{row.get('Название анализа', 'Не указано')}: {row.get('Цена', 'Не указано')} тенге\n"
+                await update.message.reply_text(response_text)
             else:
-                response_text = "Анализы не найдены. Попробуйте уточнить запрос."
-            await update.message.reply_text(response_text)
+                await update.message.reply_text("Анализ не найден. Попробуйте уточнить запрос.")
         else:
             await update.message.reply_text("Не удалось получить данные из Google Sheets.")
-    except Exception as e:
-        logger.error(f"Ошибка при обработке сообщения: {e}")
-        await update.message.reply_text("Произошла ошибка. Попробуйте позже.")
+        return
 
-# Обработка изображений с использованием OCR
-async def handle_image_request(update: Update, context):
-    # Код для OCR (распознавание текста из изображения)
-    pass
+    data = fetch_sheets_data()
+    if data:
+        similar_analyses = find_similar_analyses(user_message, data)
+        if len(similar_analyses) > 1:
+            options = [row.get("Название анализа", "") for row in similar_analyses]
+            await ask_for_clarification(update, user_message, options)
+        elif similar_analyses:
+            response_text = "Найденные анализы:\n"
+            for row in similar_analyses:
+                response_text += f"{row.get('Название анализа', 'Не указано')}: {row.get('Цена', 'Не указано')} тенге\n"
+            await update.message.reply_text(response_text)
+        else:
+            await update.message.reply_text("Анализы не найдены. Попробуйте уточнить запрос.")
+    else:
+        await update.message.reply_text("Не удалось получить данные из Google Sheets.")
 
-# Обработка команды /start
+
 async def start(update: Update, context):
     await update.message.reply_text("Добро пожаловать! Я ваш помощник по анализам.")
+
 
 def main():
     telegram_token = os.getenv("BOT_TOKEN")
     if not telegram_token:
         logger.error("Ошибка: BOT_TOKEN не найден.")
         return
-    
+
     app = ApplicationBuilder().token(telegram_token).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_faq))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image_request))
-    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_request))
+
     logger.info("Бот запущен.")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
