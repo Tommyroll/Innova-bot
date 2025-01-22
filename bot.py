@@ -124,7 +124,7 @@ ANALYSIS_SYNONYMS = {
     "свободный тестостерон": ["анализ свободного тестостерона", "свободный тестостерон кровь", "свободный тестостерон сыворотка", "свободный тестостерон гормон"],
     "гспг": ["глобулин, связывающий половые гормоны", "анализ гспг", "гспг кровь", "гспг сыворотка"],
     "лептин": ["анализ лептина", "лептин кровь", "лептин сыворотка", "лептин гормон"],
-    "β-хорионический гонадотропин человека (β-хгч)": ["хгч", "анализ хгч", "хорионический гонадотропин", "хгч кровь"],
+    "?-хорионический гонадотропин человека (?-хгч)": ["хгч", "анализ хгч", "хорионический гонадотропин", "хгч кровь"],
     "анти мюллеров гормон (амг)": ["амг", "анализ амг", "антимюллеров гормон", "амг кровь"],
     "инсулин": ["анализ инсулина", "инсулин кровь", "инсулин сыворотка", "инсулин гормон"],
     "c-пептид": ["анализ c-пептида", "c-пептид кровь", "c-пептид сыворотка", "c-пептид гормон"],
@@ -195,7 +195,7 @@ ANALYSIS_SYNONYMS = {
     "иерсинии (yersinia enterocolotica) ig g": ["антитела к иерсиниям igg", "анализ антител к иерсиниям igg", "иерсинии igg", "антитела к иерсиниям igg кровь"],
     "хеликобактер пилори (helicobacter pylori) ig a": ["антитела к хеликобактеру iga", "анализ антител к хеликобактеру iga", "хеликобактер iga", "антитела к хеликобактеру iga кровь"],
     "хеликобактер пилори (helicobacter pylori) ig g": ["антитела к хеликобактеру igg", "анализ антител к хеликобактеру igg", "хеликобактер igg", "антитела к хеликобактеру igg кровь"],
-    "аскаридоз (​​ascaris lumbricoide) ig g": ["антитела к аскаридам igg", "анализ антител к аскаридам igg", "аскариды igg", "антитела к аскаридам igg кровь"],
+    "аскаридоз (??ascaris lumbricoide) ig g": ["антитела к аскаридам igg", "анализ антител к аскаридам igg", "аскариды igg", "антитела к аскаридам igg кровь"],
     "аспергиллез (aspergillus fumigatus), igg": ["антитела к аспергиллезу igg", "анализ антител к аспергиллезу igg", "аспергиллез igg", "антитела к аспергиллезу igg кровь"],
     "лямблиоз (giardia intestinalis) ig a": ["антитела к лямблиям iga", "анализ антител к лямблиям iga", "лямблии iga", "антитела к лямблиям iga кровь"],
     "лямблиоз (giardia intestinalis) ig g": ["антитела к лямблиям igg", "анализ антител к лямблиям igg", "лямблии igg", "антитела к лямблиям igg кровь"],
@@ -279,6 +279,11 @@ ANALYSIS_SYNONYMS = {
     "беременность - пренатальный скрининг трисомий ii триместра беременности, prisca": ["пренатальный скрининг ii триместр", "анализ пренатального скрининга ii триместра", "скрининг ii триместр", "пренатальный скрининг трисомии"],
 }
 
+# Основная информация о компании
+ADDRESS = "г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход при аптеке 888 PHARM"
+ADDRESS_LINK = "https://go.2gis.com/wz9gi"
+WORKING_HOURS = "Мы работаем ежедневно с 07:00 до 17:00."
+
 def fetch_sheets_data():
     """Получение данных из Google Sheets."""
     try:
@@ -318,23 +323,25 @@ def match_analysis(query, data):
             results.append(row)
     return results
 
-def suggest_subcategories(query, data):
-    """Предлагает уточнения, если анализ имеет подкатегории."""
-    normalized_query = normalize_query(query)
-    suggestions = set()
-    for row in data:
-        analysis_name = row.get('Название анализа', '').lower()
-        if normalized_query in analysis_name:
-            suggestions.add(row['Название анализа'])
-    return list(suggestions)
+# Ответы на часто задаваемые вопросы
+async def handle_faq(update: Update, context):
+    user_message = update.message.text.lower()
 
-# Обработка команды /start
-async def start(update: Update, context):
-    await update.message.reply_text("Добро пожаловать! Отправьте текст или изображение направления, чтобы получить информацию об анализах.")
-
-# Обработка команды /help
-async def help_command(update: Update, context):
-    await update.message.reply_text("Отправьте текст или фото направления, чтобы получить информацию о доступных анализах и ценах.")
+    if "привет" in user_message or "сәлем" in user_message:
+        await update.message.reply_text("Здравствуйте! Чем могу помочь?")
+    elif "адрес" in user_message:
+        await update.message.reply_text(f"Наш адрес: {ADDRESS}\nСсылка на 2ГИС: {ADDRESS_LINK}")
+    elif "режим работы" in user_message or "график" in user_message:
+        await update.message.reply_text(WORKING_HOURS)
+    elif "подготовка" in user_message:
+        await update.message.reply_text(
+            "Общие рекомендации:\n"
+            "1. Не ешьте за 8-12 часов до сдачи крови.\n"
+            "2. Избегайте физических нагрузок за день до анализа.\n"
+            "3. Сообщите врачу о принимаемых лекарствах."
+        )
+    else:
+        await handle_text_request(update, context)
 
 # Обработка текстового запроса
 async def handle_text_request(update: Update, context):
@@ -344,16 +351,6 @@ async def handle_text_request(update: Update, context):
     try:
         data = fetch_sheets_data()
         if data:
-            # Проверяем наличие подкатегорий
-            suggestions = suggest_subcategories(user_message, data)
-            if suggestions and len(suggestions) > 1:
-                response_text = "Ваш запрос имеет несколько вариантов. Уточните, пожалуйста:\n"
-                for suggestion in suggestions:
-                    response_text += f"- {suggestion}\n"
-                await update.message.reply_text(response_text)
-                return
-            
-            # Если уточнения не требуются
             matched_results = match_analysis(user_message, data)
             if matched_results:
                 response_text = "Найденные анализы:\n"
@@ -370,49 +367,12 @@ async def handle_text_request(update: Update, context):
 
 # Обработка изображений с использованием OCR
 async def handle_image_request(update: Update, context):
-    try:
-        # Скачиваем фото, отправленное клиентом
-        file = await update.message.photo[-1].get_file()
-        file_path = f"{file.file_id}.jpg"
-        await file.download_to_drive(file_path)
+    # Код для OCR (распознавание текста из изображения)
+    pass
 
-        # Распознавание текста с помощью Google Vision
-        client = vision.ImageAnnotatorClient()
-        with open(file_path, "rb") as image_file:
-            content = image_file.read()
-        image = vision.Image(content=content)
-        response = client.text_detection(image=image)
-        texts = response.text_annotations
-
-        if not texts:
-            await update.message.reply_text("Не удалось распознать текст на изображении. Попробуйте снова.")
-            return
-
-        # Извлекаем текст из изображения
-        detected_text = texts[0].description
-        logger.info(f"Распознанный текст: {detected_text}")
-
-        # Ищем анализы по распознанным данным
-        data = fetch_sheets_data()
-        if data:
-            matched_results = []
-            for line in detected_text.split('\n'):
-                line = re.sub(r'[^а-яА-Яa-zA-Z0-9\s]', '', line)  # Удаляем лишние символы
-                matches = match_analysis(line, data)
-                matched_results.extend(matches)
-
-            if matched_results:
-                response_text = "Найденные анализы по направлению:\n"
-                for row in matched_results:
-                    response_text += f"{row.get('Название анализа', 'Не указано')}: {row.get('Цена', 'Не указано')} тенге\n"
-            else:
-                response_text = "Не удалось найти анализы по предоставленному направлению."
-            await update.message.reply_text(response_text)
-        else:
-            await update.message.reply_text("Не удалось получить данные из Google Sheets.")
-    except Exception as e:
-        logger.error(f"Ошибка при обработке изображения: {e}")
-        await update.message.reply_text("Произошла ошибка при обработке изображения. Попробуйте позже.")
+# Обработка команды /start
+async def start(update: Update, context):
+    await update.message.reply_text("Добро пожаловать! Я ваш помощник по анализам.")
 
 def main():
     telegram_token = os.getenv("BOT_TOKEN")
@@ -422,8 +382,7 @@ def main():
     
     app = ApplicationBuilder().token(telegram_token).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_request))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_faq))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image_request))
     
     logger.info("Бот запущен.")
