@@ -51,8 +51,10 @@ def format_analysis_list(data):
             return "Нет доступных данных."
         response = "Доступные анализы:\n"
         for row in data[1:]:  # Пропускаем заголовок
-            name, price, time = row
-            response += f"- {name}: {price} тг, срок выполнения: {time}\n"
+            name = row[0] if len(row) > 0 else "Неизвестный анализ"
+            price = row[1] if len(row) > 1 else "Цена не указана"
+            time = row[2] if len(row) > 2 else "Срок не указан"
+            response += f"- {name}: {price}, срок выполнения: {time}\n"
         return response
     except Exception as e:
         logger.error(f"Ошибка форматирования списка анализов: {e}")
@@ -86,15 +88,23 @@ async def handle_message(update: Update, context):
     user_message = update.message.text
     logger.info(f"Получен запрос: {user_message}")
 
+    # Простые ключевые слова
     if "анализ" in user_message.lower():
         spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
         sheet_range = "Лист1!A1:C286"
         data = read_from_sheets(spreadsheet_id, sheet_range)
-        response = format_analysis_list(data)
-        await update.message.reply_text(response)
+        if data:
+            response = format_analysis_list(data)
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("Извините, не удалось получить данные об анализах.")
     else:
         ai_response = ask_openai(user_message)
-        await update.message.reply_text(ai_response)
+        if "не могу ответить" in ai_response.lower():
+            await update.message.reply_text("Извините, я не могу обработать ваш запрос. Передаю оператору.")
+        else:
+            await update.message.reply_text(ai_response)
+
 
 # Основная функция
 def main():
