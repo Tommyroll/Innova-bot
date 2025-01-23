@@ -60,16 +60,30 @@ def format_analysis_list(data):
         logger.error(f"Ошибка форматирования списка анализов: {e}")
         return "Произошла ошибка при обработке данных."
 
-# Обработка запросов через OpenAI
+def get_lab_context():
+    return (
+        "Ты виртуальный помощник медицинской лаборатории. "
+        "Название лаборатории: [Название вашей лаборатории]. "
+        "Наш адрес: г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход при аптеке 888 PHARM. "
+        "Ссылка на 2GIS: https://go.2gis.com/wz9gi. "
+        "Рабочие часы: ежедневно с 07:00 до 17:00. "
+        "Мы проводим широкий спектр медицинских анализов по доступным ценам. "
+        "Цены, сроки выполнения анализов и подробности можно найти в нашей таблице Google Sheets. "
+        "Ты обязан предлагать услуги только этой лаборатории. "
+        "Если клиент спрашивает про ОАМ или другие анализы, расскажи, как это сделать в нашей лаборатории, "
+        "и уточни, что у нас это сделать удобно, быстро и доступно."
+    )
+
 def ask_openai(prompt):
     try:
+        lab_context = get_lab_context()
         response = openai.ChatCompletion.create(
             model="gpt-4-turbo",
             messages=[
-                {"role": "system", "content": "Ты дружелюбный помощник лаборатории."},
+                {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=150,
+            max_tokens=200,
             temperature=0.7,
         )
         return response['choices'][0]['message']['content'].strip()
@@ -77,22 +91,22 @@ def ask_openai(prompt):
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
 
+
 # Обработчик команды /start
 async def start(update: Update, context):
     await update.message.reply_text(
         "Добро пожаловать! Я виртуальный ассистент лаборатории. Чем могу помочь?"
     )
 
-# Обработчик сообщений
 async def handle_message(update: Update, context):
     user_message = update.message.text
     logger.info(f"Получен запрос: {user_message}")
 
-    # Простые ключевые слова
+    spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
+    sheet_range = "Лист1!A1:C286"
+    data = read_from_sheets(spreadsheet_id, sheet_range)
+
     if "анализ" in user_message.lower():
-        spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
-        sheet_range = "Лист1!A1:C286"
-        data = read_from_sheets(spreadsheet_id, sheet_range)
         if data:
             response = format_analysis_list(data)
             await update.message.reply_text(response)
@@ -100,10 +114,7 @@ async def handle_message(update: Update, context):
             await update.message.reply_text("Извините, не удалось получить данные об анализах.")
     else:
         ai_response = ask_openai(user_message)
-        if "не могу ответить" in ai_response.lower():
-            await update.message.reply_text("Извините, я не могу обработать ваш запрос. Передаю оператору.")
-        else:
-            await update.message.reply_text(ai_response)
+        await update.message.reply_text(ai_response)
 
 
 # Основная функция
