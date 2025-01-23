@@ -68,11 +68,12 @@ def get_lab_context():
         "Ссылка на 2GIS: https://go.2gis.com/wz9gi. "
         "Рабочие часы: ежедневно с 07:00 до 17:00. "
         "Мы проводим широкий спектр медицинских анализов по доступным ценам. "
-        "Цены, сроки выполнения анализов и подробности можно найти в нашей таблице Google Sheets. "
         "Ты обязан предлагать услуги только этой лаборатории. "
-        "Если клиент спрашивает про ОАМ или другие анализы, расскажи, как это сделать в нашей лаборатории, "
-        "и уточни, что у нас это сделать удобно, быстро и доступно."
+        "Отвечай кратко, сжато и по существу. "
+        "Не используй лишнюю информацию или общие слова. "
+        "В ответе обязательно укажи стоимость, сроки выполнения анализа и как подготовиться."
     )
+
 
 def ask_openai(prompt):
     try:
@@ -83,13 +84,14 @@ def ask_openai(prompt):
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=200,
-            temperature=0.7,
+            max_tokens=400,  # Увеличиваем лимит токенов
+            temperature=0.5,  # Снижаем случайность ответов
         )
         return response['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
+
 
 
 # Обработчик команды /start
@@ -106,16 +108,17 @@ async def handle_message(update: Update, context):
     sheet_range = "Лист1!A1:C286"
     data = read_from_sheets(spreadsheet_id, sheet_range)
 
-    if "анализ" in user_message.lower():
+    if "анализ" in user_message.lower() or "оам" in user_message.lower():
         if data:
             response = format_analysis_list(data)
+            response += "\nНе забудьте подготовиться к сдаче анализа. "
+            response += "Для дополнительной информации обращайтесь к нашим операторам."
             await update.message.reply_text(response)
         else:
             await update.message.reply_text("Извините, не удалось получить данные об анализах.")
     else:
         ai_response = ask_openai(user_message)
         await update.message.reply_text(ai_response)
-
 
 # Основная функция
 def main():
