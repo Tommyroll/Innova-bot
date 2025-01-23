@@ -75,8 +75,8 @@ async def handle_message(update: Update, context):
 
     # Простые ключевые слова
     if "анализ" in user_message.lower():
-        spreadsheet_id = "ваш_ID_таблицы"
-        sheet_range = "Лист1!A1:B10"
+        spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
+        sheet_range = "Лист1!A1:C286"
         data = read_from_sheets(spreadsheet_id, sheet_range)
         if data:
             response = "Вот список доступных анализов:\n"
