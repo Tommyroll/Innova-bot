@@ -45,35 +45,24 @@ def read_from_sheets(spreadsheet_id, sheet_range):
     return []
 
 # Формирование списка анализов
-def format_analysis_list(data):
-    try:
-        if not data:
-            return "Нет доступных данных."
-        response = "Доступные анализы:\n"
-        for row in data[1:]:  # Пропускаем заголовок
-            name = row[0] if len(row) > 0 else "Неизвестный анализ"
-            price = row[1] if len(row) > 1 else "Цена не указана"
-            time = row[2] if len(row) > 2 else "Срок не указан"
-            response += f"- {name}: {price}, срок выполнения: {time}\n"
-        return response
-    except Exception as e:
-        logger.error(f"Ошибка форматирования списка анализов: {e}")
-        return "Произошла ошибка при обработке данных."
+def format_analysis_response(data, query):
+    for row in data:
+        if query.lower() in row[0].lower():  # Ищем анализ по названию
+            test_name = row[0]
+            price = row[1]
+            time = row[2]
+            return f"{test_name}: Цена — {price} KZT. Срок выполнения — {time}. Для сдачи следуйте инструкциям: избегайте пищи и жидкости перед анализом."
+    return "Извините, не удалось найти информацию о запрашиваемом анализе."
+
 
 def get_lab_context():
     return (
-        "Ты виртуальный помощник медицинской лаборатории. "
-        "Название лаборатории: [Название вашей лаборатории]. "
-        "Наш адрес: г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход при аптеке 888 PHARM. "
-        "Ссылка на 2GIS: https://go.2gis.com/wz9gi. "
-        "Рабочие часы: ежедневно с 07:00 до 17:00. "
-        "Мы проводим широкий спектр медицинских анализов по доступным ценам. "
-        "Ты обязан предлагать услуги только этой лаборатории. "
-        "Отвечай кратко, сжато и по существу. "
-        "Не используй лишнюю информацию или общие слова. "
-        "В ответе обязательно укажи стоимость, сроки выполнения анализа и как подготовиться."
+        "Ты — виртуальный помощник медицинской лаборатории. "
+        "Отвечай кратко и по существу. "
+        "Обязательно указывай стоимость анализа, сроки выполнения и инструкции по подготовке, если пользователь упоминает конкретный анализ. "
+        "Не используй длинные приветствия или дополнительные фразы. "
+        "Дай пользователю всю необходимую информацию без лишних деталей."
     )
-
 
 def ask_openai(prompt):
     try:
@@ -101,24 +90,23 @@ async def start(update: Update, context):
     )
 
 async def handle_message(update: Update, context):
-    user_message = update.message.text
+    user_message = update.message.text.lower()
     logger.info(f"Получен запрос: {user_message}")
 
     spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
     sheet_range = "Лист1!A1:C286"
     data = read_from_sheets(spreadsheet_id, sheet_range)
 
-    if "анализ" in user_message.lower() or "оам" in user_message.lower():
+    if "оам" in user_message:
         if data:
-            response = format_analysis_list(data)
-            response += "\nНе забудьте подготовиться к сдаче анализа. "
-            response += "Для дополнительной информации обращайтесь к нашим операторам."
+            response = format_analysis_response(data, "ОАМ")
             await update.message.reply_text(response)
         else:
-            await update.message.reply_text("Извините, не удалось получить данные об анализах.")
+            await update.message.reply_text("Извините, данные о цене и сроках недоступны.")
     else:
         ai_response = ask_openai(user_message)
         await update.message.reply_text(ai_response)
+
 
 # Основная функция
 def main():
