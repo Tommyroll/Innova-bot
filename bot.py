@@ -44,7 +44,21 @@ def read_from_sheets(spreadsheet_id, sheet_range):
         logger.error(f"Ошибка чтения Google Sheets: {e}")
     return []
 
-# Обработка запросов через OpenAI с использованием gpt-4-turbo
+# Формирование списка анализов
+def format_analysis_list(data):
+    try:
+        if not data:
+            return "Нет доступных данных."
+        response = "Доступные анализы:\n"
+        for row in data[1:]:  # Пропускаем заголовок
+            name, price, time = row
+            response += f"- {name}: {price} тг, срок выполнения: {time}\n"
+        return response
+    except Exception as e:
+        logger.error(f"Ошибка форматирования списка анализов: {e}")
+        return "Произошла ошибка при обработке данных."
+
+# Обработка запросов через OpenAI
 def ask_openai(prompt):
     try:
         response = openai.ChatCompletion.create(
@@ -61,7 +75,6 @@ def ask_openai(prompt):
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
 
-
 # Обработчик команды /start
 async def start(update: Update, context):
     await update.message.reply_text(
@@ -73,23 +86,15 @@ async def handle_message(update: Update, context):
     user_message = update.message.text
     logger.info(f"Получен запрос: {user_message}")
 
-    # Простые ключевые слова
     if "анализ" in user_message.lower():
         spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
         sheet_range = "Лист1!A1:C286"
         data = read_from_sheets(spreadsheet_id, sheet_range)
-        if data:
-            response = "Вот список доступных анализов:\n"
-            response += "\n".join([f"- {row[0]}: {row[1]} тг" for row in data])
-            await update.message.reply_text(response)
-        else:
-            await update.message.reply_text("Извините, не удалось получить данные об анализах.")
+        response = format_analysis_list(data)
+        await update.message.reply_text(response)
     else:
         ai_response = ask_openai(user_message)
-        if "не могу ответить" in ai_response.lower():
-            await update.message.reply_text("Извините, я не могу обработать ваш запрос. Передаю оператору.")
-        else:
-            await update.message.reply_text(ai_response)
+        await update.message.reply_text(ai_response)
 
 # Основная функция
 def main():
