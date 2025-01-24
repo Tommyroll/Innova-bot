@@ -55,7 +55,7 @@ def get_lab_context(analyses):
         [f"{name}: Цена — {price} KZT. Срок выполнения — {timeframe}." for name, price, timeframe in analyses]
     )
     return (
-        "Ты — помощник медицинской лаборатории. Пользователь может запрашивать анализы в произвольной форме. "
+        "Ты — виртуальный помощник медицинской лаборатории. Пользователь может запрашивать анализы в произвольной форме. "
         "Вот данные всех анализов, которые есть в базе:\n"
         f"{analyses_list}\n\n"
         "Если пользователь спрашивает про какой-то анализ, попытайся сопоставить его запрос с доступными анализами "
@@ -66,6 +66,7 @@ def get_lab_context(analyses):
 # Запрос к OpenAI
 def ask_openai(prompt, analyses):
     try:
+        # Передаем в контекст весь список анализов
         lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
             model="gpt-4-turbo",
@@ -97,7 +98,7 @@ async def handle_message(update: Update, context):
     # Получение всех анализов из БД
     analyses = get_all_analyses()
 
-    # Обработка запроса через OpenAI
+    # Всегда отправляем запрос в OpenAI
     response = ask_openai(user_message, analyses)
 
     await update.message.reply_text(response)
