@@ -1,9 +1,7 @@
 import logging
 import os
 import openai
-import json
-from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
+import sqlite3
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
@@ -17,44 +15,48 @@ logger = logging.getLogger(__name__)
 # Получение переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+DATABASE_PATH = "lab_data.db"  # Укажите путь к вашей базе данных SQLite
 
 # Инициализация OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Настройка Google Sheets API
-def get_google_sheets_service():
+# Функция для подключения к базе данных
+def connect_to_db():
     try:
-        credentials = Credentials.from_service_account_info(json.loads(SERVICE_ACCOUNT_JSON))
-        service = build("sheets", "v4", credentials=credentials)
-        return service
-    except Exception as e:
-        logger.error(f"Ошибка настройки Google Sheets: {e}")
+        conn = sqlite3.connect(DATABASE_PATH)
+        return conn
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка подключения к базе данных: {e}")
         return None
 
-# Чтение данных из Google Sheets
-def read_from_sheets(spreadsheet_id, sheet_range):
+# Чтение данных из базы SQLite
+def query_analysis(query):
     try:
-        service = get_google_sheets_service()
-        if service:
-            sheet = service.spreadsheets()
-            result = sheet.values().get(spreadsheetId=spreadsheet_id, range=sheet_range).execute()
-            return result.get("values", [])
-    except Exception as e:
-        logger.error(f"Ошибка чтения Google Sheets: {e}")
+        conn = connect_to_db()
+        if conn:
+            cursor = conn.cursor()
+            # Поиск по имени анализа (или его синонимам, если нужно)
+            cursor.execute("""
+                SELECT name, price, timeframe FROM analyses
+                WHERE LOWER(name) LIKE ? 
+            """, (f"%{query.lower()}%",))
+            results = cursor.fetchall()
+            conn.close()
+            return results
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка запроса к базе данных: {e}")
     return []
 
-# Формирование списка анализов
-def format_analysis_response(data, query):
-    for row in data:
-        if query.lower() in row[0].lower():  # Ищем анализ по названию
-            test_name = row[0]
-            price = row[1]
-            time = row[2]
-            return f"{test_name}: Цена — {price} KZT. Срок выполнения — {time}. Для сдачи следуйте инструкциям: избегайте пищи и жидкости перед анализом."
+# Формирование ответа из результатов SQLite
+def format_analysis_response(results):
+    if results:
+        response = "\n".join(
+            [f"{name}: Цена — {price} KZT. Срок выполнения — {timeframe}." for name, price, timeframe in results]
+        )
+        return response
     return "Извините, не удалось найти информацию о запрашиваемом анализе."
 
-
+# Функция для формирования контекста OpenAI
 def get_lab_context():
     return (
         "Ты — виртуальный помощник медицинской лаборатории. "
@@ -64,6 +66,7 @@ def get_lab_context():
         "Дай пользователю всю необходимую информацию без лишних деталей."
     )
 
+# Запрос к OpenAI
 def ask_openai(prompt):
     try:
         lab_context = get_lab_context()
@@ -81,32 +84,26 @@ def ask_openai(prompt):
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
 
-
-
 # Обработчик команды /start
 async def start(update: Update, context):
     await update.message.reply_text(
         "Добро пожаловать! Я виртуальный ассистент лаборатории. Чем могу помочь?"
     )
 
+# Обработчик сообщений
 async def handle_message(update: Update, context):
     user_message = update.message.text.lower()
     logger.info(f"Получен запрос: {user_message}")
 
-    spreadsheet_id = "1FlGPuIRdPcN2ACOQXQaesawAMtgOqd90vdk4f0PlUks"
-    sheet_range = "Лист1!A1:C286"
-    data = read_from_sheets(spreadsheet_id, sheet_range)
-
-    if "оам" in user_message:
-        if data:
-            response = format_analysis_response(data, "ОАМ")
-            await update.message.reply_text(response)
-        else:
-            await update.message.reply_text("Извините, данные о цене и сроках недоступны.")
+    # Поиск в базе SQLite
+    results = query_analysis(user_message)
+    if results:
+        response = format_analysis_response(results)
     else:
-        ai_response = ask_openai(user_message)
-        await update.message.reply_text(ai_response)
+        # Если анализ не найден, передать запрос в OpenAI
+        response = ask_openai(user_message)
 
+    await update.message.reply_text(response)
 
 # Основная функция
 def main():
