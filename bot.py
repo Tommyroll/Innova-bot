@@ -4,6 +4,7 @@ import openai
 import sqlite3
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+DB_FILE = "lab_data.db"
 
 # Настройка логирования
 logging.basicConfig(
