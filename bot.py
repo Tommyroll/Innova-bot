@@ -1,27 +1,30 @@
 import logging
 import os
-import openai
 import sqlite3
+import openai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+
+# Константы
 DB_FILE = "lab_data.db"
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# Получение переменных окружения
+# Переменные окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_PATH = "lab_data.db"  # Укажите путь к вашей базе данных SQLite
+DATABASE_PATH = DB_FILE
 
-# Инициализация OpenAI
+# Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Функция для подключения к базе данных
+
+# Функция подключения к БД
 def connect_to_db():
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -30,60 +33,54 @@ def connect_to_db():
         logger.error(f"Ошибка подключения к базе данных: {e}")
         return None
 
-# Чтение данных из базы SQLite
-def query_analysis(query):
+
+# Функция получения всех анализов из БД
+def get_all_analyses():
     try:
         conn = connect_to_db()
         if conn:
             cursor = conn.cursor()
-            # Поиск по имени анализа (или его синонимам, если нужно)
-            cursor.execute("""
-                SELECT name, price, timeframe FROM analyses
-                WHERE LOWER(name) LIKE ? 
-            """, (f"%{query.lower()}%",))
+            cursor.execute("SELECT name, price, timeframe FROM analyses")
             results = cursor.fetchall()
             conn.close()
             return results
     except sqlite3.Error as e:
-        logger.error(f"Ошибка запроса к базе данных: {e}")
+        logger.error(f"Ошибка при извлечении данных из БД: {e}")
     return []
 
-# Формирование ответа из результатов SQLite
-def format_analysis_response(results):
-    if results:
-        response = "\n".join(
-            [f"{name}: Цена — {price} KZT. Срок выполнения — {timeframe}." for name, price, timeframe in results]
-        )
-        return response
-    return "Извините, не удалось найти информацию о запрашиваемом анализе."
 
-# Функция для формирования контекста OpenAI
-def get_lab_context():
+# Формирование контекста для OpenAI
+def get_lab_context(analyses):
+    analyses_list = "\n".join(
+        [f"{name}: Цена — {price} KZT. Срок выполнения — {timeframe}." for name, price, timeframe in analyses]
+    )
     return (
-        "Ты — виртуальный помощник медицинской лаборатории. "
-        "Отвечай кратко и по существу. "
-        "Обязательно указывай стоимость анализа, сроки выполнения и инструкции по подготовке, если пользователь упоминает конкретный анализ. "
-        "Не используй длинные приветствия или дополнительные фразы. "
-        "Дай пользователю всю необходимую информацию без лишних деталей."
+        "Ты — помощник медицинской лаборатории. Пользователь может запрашивать анализы в произвольной форме. "
+        "Вот данные всех анализов, которые есть в базе:\n"
+        f"{analyses_list}\n\n"
+        "Если пользователь спрашивает про какой-то анализ, попытайся сопоставить его запрос с доступными анализами "
+        "и предоставь информацию. Если анализ не найден, скажи, что его нет в базе."
     )
 
+
 # Запрос к OpenAI
-def ask_openai(prompt):
+def ask_openai(prompt, analyses):
     try:
-        lab_context = get_lab_context()
+        lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
             model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=400,  # Увеличиваем лимит токенов
-            temperature=0.5,  # Снижаем случайность ответов
+            max_tokens=400,
+            temperature=0.5,
         )
         return response['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
+
 
 # Обработчик команды /start
 async def start(update: Update, context):
@@ -91,20 +88,20 @@ async def start(update: Update, context):
         "Добро пожаловать! Я виртуальный ассистент лаборатории. Чем могу помочь?"
     )
 
+
 # Обработчик сообщений
 async def handle_message(update: Update, context):
-    user_message = update.message.text.lower()
+    user_message = update.message.text
     logger.info(f"Получен запрос: {user_message}")
 
-    # Поиск в базе SQLite
-    results = query_analysis(user_message)
-    if results:
-        response = format_analysis_response(results)
-    else:
-        # Если анализ не найден, передать запрос в OpenAI
-        response = ask_openai(user_message)
+    # Получение всех анализов из БД
+    analyses = get_all_analyses()
+
+    # Обработка запроса через OpenAI
+    response = ask_openai(user_message, analyses)
 
     await update.message.reply_text(response)
+
 
 # Основная функция
 def main():
@@ -113,6 +110,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
