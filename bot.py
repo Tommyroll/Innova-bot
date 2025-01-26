@@ -34,53 +34,14 @@ def connect_to_db():
         return None
 
 
-# Функция инициализации БД для логирования
-def initialize_db():
-    conn = connect_to_db()
-    if conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS missing_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS unhandled_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.commit()
-        conn.close()
+# Функция приведения строки к нижнему регистру и замены кириллицы
+def normalize_text(text):
+    # Замена кириллической "б" на латинскую "b"
+    text = text.replace("б", "b")
+    return text.lower()  # Приведение к нижнему регистру
 
 
-# Функция сохранения запросов в таблицы
-def log_missing_request(query):
-    conn = connect_to_db()
-    if conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO missing_requests (query) VALUES (?)", (query,))
-        conn.commit()
-        conn.close()
-
-
-def log_unhandled_request(query):
-    conn = connect_to_db()
-    if conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO unhandled_requests (query) VALUES (?)", (query,))
-        conn.commit()
-        conn.close()
-
-
-# Функция получения всех анализов из БД
+# Функция получения всех анализов из БД (в нижнем регистре)
 def get_all_analyses():
     try:
         conn = connect_to_db()
@@ -89,7 +50,8 @@ def get_all_analyses():
             cursor.execute("SELECT name, price, timeframe FROM analyses")
             results = cursor.fetchall()
             conn.close()
-            return results
+            # Приводим названия анализов к нижнему регистру
+            return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при извлечении данных из БД: {e}")
     return []
@@ -114,7 +76,7 @@ def ask_openai(prompt, analyses):
     try:
         lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
@@ -128,6 +90,27 @@ def ask_openai(prompt, analyses):
         return "Извините, я не смог обработать ваш запрос."
 
 
+# Логирование отсутствующих запросов
+def log_missing_request(query):
+    conn = connect_to_db()
+    if conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO missing_requests (query) VALUES (?)", (query,))
+        conn.commit()
+        conn.close()
+
+
+# Логика обработки ответа от OpenAI
+def process_response(response, user_message):
+    # Проверяем, содержит ли ответ фразы о том, что анализа нет
+    if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
+        log_missing_request(user_message)
+        return (
+            "Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения."
+        )
+    return response
+
+
 # Обработчик команды /start
 async def start(update: Update, context):
     await update.message.reply_text(
@@ -137,32 +120,19 @@ async def start(update: Update, context):
 
 # Обработчик сообщений
 async def handle_message(update: Update, context):
-    user_message = update.message.text
+    user_message = normalize_text(update.message.text)  # Нормализуем запрос пользователя
     logger.info(f"Получен запрос: {user_message}")
 
     analyses = get_all_analyses()
     response = ask_openai(user_message, analyses)
 
-    # Логика проверки ответа
-    if "анализ отсутствует в нашей базе" in response.lower():
-        log_missing_request(user_message)  # Логируем отсутствующий анализ
-        await update.message.reply_text(
-            "Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения."
-        )
-    elif "не понял" in response.lower() or "не могу обработать" in response.lower():
-        log_unhandled_request(user_message)  # Логируем непонятные запросы
-        await update.message.reply_text(
-            "К сожалению, я не смог обработать ваш запрос. Переключаю на оператора."
-        )
-    else:
-        # Обрезаем лишние фразы перед отправкой
-        short_response = response.split("Если вам нужно")[0].strip()
-        await update.message.reply_text(short_response)
+    # Обрабатываем ответ и отправляем пользователю
+    final_response = process_response(response, user_message)
+    await update.message.reply_text(final_response)
 
 
 # Основная функция
 def main():
-    initialize_db()  # Инициализация БД
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
