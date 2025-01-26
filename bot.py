@@ -69,7 +69,7 @@ def ask_openai(prompt, analyses):
         # Передаем в контекст весь список анализов
         lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
-            model="gpt-4-turbo",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
