@@ -76,7 +76,7 @@ def ask_openai(prompt, analyses):
     try:
         lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
-            model="gpt-4-turbo",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
