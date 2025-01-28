@@ -21,7 +21,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_PATH = DB_FILE
 
 # Telegram ID администратора
-ADMIN_TELEGRAM_ID = "ВАШ_TELEGRAM_ID"  # Укажите ваш ID, полученный через @userinfobot
+ADMIN_TELEGRAM_ID = "5241327545"  # Укажите ваш ID, полученный через @userinfobot
 
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
