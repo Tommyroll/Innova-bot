@@ -3,7 +3,7 @@ import os
 import sqlite3
 import openai
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Константы
 DB_FILE = "lab_data.db"
@@ -26,6 +26,9 @@ ADMIN_TELEGRAM_ID = "5241327545"  # Укажите ваш ID, полученны
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
+# Словарь для хранения необработанных запросов
+pending_requests = {}
+
 
 # Функция подключения к БД
 def connect_to_db():
@@ -39,12 +42,11 @@ def connect_to_db():
 
 # Функция приведения строки к нижнему регистру и замены кириллицы
 def normalize_text(text):
-    # Замена кириллической "б" на латинскую "b"
     text = text.replace("б", "b")
-    return text.lower()  # Приведение к нижнему регистру
+    return text.lower()
 
 
-# Функция получения всех анализов из БД (в нижнем регистре)
+# Функция получения всех анализов из БД
 def get_all_analyses():
     try:
         conn = connect_to_db()
@@ -53,7 +55,6 @@ def get_all_analyses():
             cursor.execute("SELECT name, price, timeframe FROM analyses")
             results = cursor.fetchall()
             conn.close()
-            # Приводим названия анализов к нижнему регистру
             return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при извлечении данных из БД: {e}")
@@ -75,10 +76,15 @@ def get_lab_context(analyses):
 
 
 # Отправка уведомления администратору
-async def notify_admin_about_missing_request(query, context):
-    message = f"⚠️ Пропущенный запрос: {query}"
+async def notify_admin_about_missing_request(query, user_id, context):
+    pending_requests[user_id] = query  # Сохраняем запрос клиента
+    message = (
+        f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
+        f"Запрос: {query}\n\n"
+        f"Ответьте этому пользователю, отправив сообщение боту в формате:\n"
+        f"/reply {user_id} [Ваш ответ]"
+    )
     try:
-        # Убедимся, что бот отправляет сообщение в ваш личный чат
         await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=message)
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления администратору: {e}")
@@ -97,16 +103,16 @@ def ask_openai(prompt, analyses):
             max_tokens=200,
             temperature=0.5,
         )
-        return response['choices'][0]['message']['content'].strip()
+        return response["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
 
 
 # Логика обработки ответа от OpenAI
-async def process_response(response, user_message, context):
+async def process_response(response, user_message, user_id, context):
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
-        await notify_admin_about_missing_request(user_message, context)
+        await notify_admin_about_missing_request(user_message, user_id, context)
         return (
             "Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения."
         )
@@ -120,29 +126,37 @@ async def start(update: Update, context):
     )
 
 
-# Ответы на вопросы о времени работы и адресе
-async def handle_info_request(update: Update, context):
-    user_message = normalize_text(update.message.text)
-    if "адрес" in user_message:
-        await update.message.reply_text(
-            "Наш адрес: г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход с аптеки 888 Pharm."
-        )
-    elif any(phrase in user_message for phrase in ["время работы", "режим работы", "до скольки", "когда работаете"]):
-        await update.message.reply_text("Мы работаем ежедневно с 07:00 до 17:00.")
-    else:
-        await handle_message(update, context)
+# Обработчик команды /reply для ответов админа
+async def reply(update: Update, context):
+    if str(update.message.chat_id) != ADMIN_TELEGRAM_ID:
+        return
+
+    try:
+        command_parts = update.message.text.split(" ", 2)
+        user_id = int(command_parts[1])
+        reply_message = command_parts[2]
+
+        if user_id in pending_requests:
+            await context.bot.send_message(chat_id=user_id, text=reply_message)
+            await update.message.reply_text("Ответ отправлен клиенту.")
+            pending_requests.pop(user_id)
+        else:
+            await update.message.reply_text("Не найден запрос для указанного пользователя.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Неправильный формат команды. Используйте: /reply <user_id> <ответ>")
 
 
 # Обработчик сообщений
 async def handle_message(update: Update, context):
     user_message = normalize_text(update.message.text)
-    logger.info(f"Получен запрос: {user_message}")
+    user_id = update.message.chat_id
+    logger.info(f"Получен запрос от {user_id}: {user_message}")
 
     analyses = get_all_analyses()
     response = ask_openai(user_message, analyses)
 
     # Обрабатываем ответ и отправляем пользователю
-    final_response = await process_response(response, user_message, context)
+    final_response = await process_response(response, user_message, user_id, context)
     await update.message.reply_text(final_response)
 
 
@@ -150,7 +164,8 @@ async def handle_message(update: Update, context):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_info_request))
+    app.add_handler(CommandHandler("reply", reply))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
 
