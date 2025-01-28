@@ -78,6 +78,7 @@ def get_lab_context(analyses):
 async def notify_admin_about_missing_request(query, context):
     message = f"⚠️ Пропущенный запрос: {query}"
     try:
+        # Убедимся, что бот отправляет сообщение в ваш личный чат
         await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=message)
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления администратору: {e}")
@@ -126,7 +127,7 @@ async def handle_info_request(update: Update, context):
         await update.message.reply_text(
             "Наш адрес: г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход с аптеки 888 Pharm."
         )
-    elif "время работы" in user_message or "режим работы" in user_message:
+    elif any(phrase in user_message for phrase in ["время работы", "режим работы", "до скольки", "когда работаете"]):
         await update.message.reply_text("Мы работаем ежедневно с 07:00 до 17:00.")
     else:
         await handle_message(update, context)
