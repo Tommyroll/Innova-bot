@@ -20,6 +20,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_PATH = DB_FILE
 
+# Telegram ID администратора
+ADMIN_TELEGRAM_ID = "ВАШ_TELEGRAM_ID"  # Укажите ваш ID, полученный через @userinfobot
+
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
@@ -71,6 +74,15 @@ def get_lab_context(analyses):
     )
 
 
+# Отправка уведомления администратору
+async def notify_admin_about_missing_request(query, context):
+    message = f"⚠️ Пропущенный запрос: {query}"
+    try:
+        await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=message)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления администратору: {e}")
+
+
 # Запрос к OpenAI
 def ask_openai(prompt, analyses):
     try:
@@ -81,7 +93,7 @@ def ask_openai(prompt, analyses):
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=200,  # Уменьшение длины ответа
+            max_tokens=200,
             temperature=0.5,
         )
         return response['choices'][0]['message']['content'].strip()
@@ -90,21 +102,10 @@ def ask_openai(prompt, analyses):
         return "Извините, я не смог обработать ваш запрос."
 
 
-# Логирование отсутствующих запросов
-def log_missing_request(query):
-    conn = connect_to_db()
-    if conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO missing_requests (query) VALUES (?)", (query,))
-        conn.commit()
-        conn.close()
-
-
 # Логика обработки ответа от OpenAI
-def process_response(response, user_message):
-    # Проверяем, содержит ли ответ фразы о том, что анализа нет
+async def process_response(response, user_message, context):
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
-        log_missing_request(user_message)
+        await notify_admin_about_missing_request(user_message, context)
         return (
             "Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения."
         )
@@ -118,16 +119,29 @@ async def start(update: Update, context):
     )
 
 
+# Ответы на вопросы о времени работы и адресе
+async def handle_info_request(update: Update, context):
+    user_message = normalize_text(update.message.text)
+    if "адрес" in user_message:
+        await update.message.reply_text(
+            "Наш адрес: г. Алматы, ул. Розыбакиева 310А, ЖК 4YOU, вход с аптеки 888 Pharm."
+        )
+    elif "время работы" in user_message or "режим работы" in user_message:
+        await update.message.reply_text("Мы работаем ежедневно с 07:00 до 17:00.")
+    else:
+        await handle_message(update, context)
+
+
 # Обработчик сообщений
 async def handle_message(update: Update, context):
-    user_message = normalize_text(update.message.text)  # Нормализуем запрос пользователя
+    user_message = normalize_text(update.message.text)
     logger.info(f"Получен запрос: {user_message}")
 
     analyses = get_all_analyses()
     response = ask_openai(user_message, analyses)
 
     # Обрабатываем ответ и отправляем пользователю
-    final_response = process_response(response, user_message)
+    final_response = await process_response(response, user_message, context)
     await update.message.reply_text(final_response)
 
 
@@ -135,7 +149,7 @@ async def handle_message(update: Update, context):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_info_request))
     logger.info("Бот запущен.")
     app.run_polling()
 
