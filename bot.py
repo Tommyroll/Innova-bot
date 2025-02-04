@@ -100,7 +100,7 @@ def ask_openai(prompt, analyses):
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=200,
+            max_tokens=400,
             temperature=0.5,
         )
         return response["choices"][0]["message"]["content"].strip()
