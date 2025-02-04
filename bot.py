@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Константы
-DB_FILE = "lab_data.db"
+DB_FILE = "lab_data(2).db"
 
 # Логирование
 logging.basicConfig(
