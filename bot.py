@@ -222,6 +222,7 @@ async def reply(update: Update, context):
         await update.message.reply_text("Неправильный формат команды. Используйте: /reply <user_id> <ответ>")
 
 # Основной обработчик сообщений
+pending_requests = {}
 async def handle_message(update: Update, context):
     user_message = normalize_text(update.message.text)
     user_id = update.message.chat_id
