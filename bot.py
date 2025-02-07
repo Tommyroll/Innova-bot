@@ -31,7 +31,7 @@ ADMIN_TELEGRAM_ID = "5241327545"
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Глобальный словарь для сохранения последних запросов пользователей
+# Глобальный словарь для хранения последних запросов пользователей
 pending_requests = {}
 
 ##########################
@@ -48,11 +48,7 @@ def connect_to_db():
         return None
 
 def get_all_analyses():
-    """
-    Получает все анализы из таблицы analyses.
-    Ожидается, что таблица analyses имеет столбцы: name, price, timeframe.
-    Все названия приводятся к нижнему регистру с заменой кириллицы ("б" → "b").
-    """
+    """Получает все анализы из таблицы analyses."""
     conn = connect_to_db()
     if not conn:
         return []
@@ -67,10 +63,7 @@ def get_all_analyses():
         return []
 
 def get_competitor_data():
-    """
-    Загружает данные из таблицы competitor_prices.
-    Ожидается, что таблица competitor_prices имеет столбцы: name, lab, price, timeframe.
-    """
+    """Получает данные из таблицы competitor_prices."""
     conn = connect_to_db()
     if not conn:
         return []
@@ -122,7 +115,7 @@ def ask_openai(prompt, analyses):
     try:
         lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # Если модель недоступна, можно переключиться на gpt-4-turbo
+            model="gpt-4o-mini",  # При необходимости переключитесь на другую модель
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
@@ -142,10 +135,10 @@ def ask_openai(prompt, analyses):
 def find_best_match(query, competitor_data):
     """
     Использует get_close_matches для поиска наиболее похожего анализа среди данных конкурентов.
-    Если схожесть достаточно высокая (порог 0.6), возвращает первую найденную запись.
+    Порог схожести установлен на 0.5.
     """
     competitor_names = [name for name, _, _, _ in competitor_data]
-    matches = get_close_matches(query, competitor_names, n=1, cutoff=0.6)
+    matches = get_close_matches(query, competitor_names, n=1, cutoff=0.5)
     if matches:
         for name, lab, price, timeframe in competitor_data:
             if name == matches[0]:
@@ -154,14 +147,21 @@ def find_best_match(query, competitor_data):
 
 def compare_with_competitors(query):
     """
-    Сравнивает цену нашего анализа с конкурентами.
+    Сравнивает цены для каждого анализа, если в запросе перечислено несколько анализов,
+    разделенных запятыми. Возвращает сравнительный анализ.
     """
     competitor_data = get_competitor_data()
-    best = find_best_match(query, competitor_data)
-    if best:
-        name, lab, price, timeframe = best
-        return f"Конкурент ({lab}): {name}: Цена — {price} KZT, Срок — {timeframe}."
-    return "Информация по конкурентам не найдена."
+    # Если запрос содержит запятые, разбиваем его
+    parts = [part.strip() for part in query.split(",")] if "," in query else [query]
+    results = []
+    for part in parts:
+        best = find_best_match(part, competitor_data)
+        if best:
+            name, lab, price, timeframe = best
+            results.append(f"Конкурент ({lab}): {name} — {price} KZT, Срок: {timeframe}")
+        else:
+            results.append(f"По запросу '{part}' информация по конкурентам не найдена.")
+    return "\n".join(results)
 
 ##########################
 # Логирование необработанных запросов и уведомление оператора
@@ -184,7 +184,8 @@ async def notify_admin_about_missing_request(query, user_id, context):
 
 async def process_response(response, user_message, user_id, context):
     """
-    Если ответ от OpenAI содержит фразы об отсутствии анализа, уведомляет администратора и возвращает шаблонный ответ.
+    Если ответ от OpenAI содержит фразы о том, что анализ не найден, уведомляет оператора
+    и возвращает шаблонный ответ.
     """
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
         await notify_admin_about_missing_request(user_message, user_id, context)
@@ -225,6 +226,10 @@ async def handle_message(update: Update, context):
         if user_id in pending_requests:
             original_query = pending_requests[user_id]
             comp_response = compare_with_competitors(original_query)
+            # Если сравнение не найдено, уведомляем администратора
+            if "не найдена" in comp_response.lower():
+                await notify_admin_about_missing_request(original_query, user_id, context)
+                comp_response += "\n\nИзвините, информация по конкурентам отсутствует. Запрос передан оператору."
             await update.message.reply_text(comp_response)
             return
         else:
@@ -234,16 +239,15 @@ async def handle_message(update: Update, context):
     # Сохраняем последний запрос пользователя (для возможности сравнения)
     pending_requests[user_id] = user_message
 
-    # Получаем данные наших анализов
     analyses = get_all_analyses()
     response = ask_openai(user_message, analyses)
     final_response = await process_response(response, user_message, user_id, context)
 
-    # Если конкурентные данные есть, предлагаем сравнить
+    # Если конкурентные данные есть, предлагаем сравнить цены с конкурентами
     competitor_data = get_competitor_data()
     if competitor_data:
         final_response += "\n\nЕсли хотите сравнить цены с конкурентами, отправьте 'сравнить'."
-
+    
     await update.message.reply_text(final_response)
 
 # Основная функция
