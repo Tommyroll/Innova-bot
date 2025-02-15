@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # Константы и настройки
-DB_FILE = "lab_data(2).db"  # Файл базы данных с нашими анализами и данными конкурентов
+DB_FILE = "lab_data(2).db"  # Файл базы данных с нашими анализами и конкурентами
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -31,7 +31,7 @@ ADMIN_TELEGRAM_ID = "5241327545"
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Глобальный словарь для хранения последних запросов пользователей
+# Глобальный словарь для хранения извлечённых названий анализов из последнего запроса
 pending_requests = {}
 
 ##########################
@@ -98,13 +98,13 @@ def get_lab_context(analyses):
     Формирует системный контекст для OpenAI с перечнем наших анализов.
     """
     analyses_list = "\n".join(
-        [f"{name}: Цена — {price} KZT. Срок выполнения — {timeframe}." for name, price, timeframe in analyses]
+        [f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses]
     )
     return (
-        "Ты — виртуальный помощник медицинской лаборатории. Пользователь может запрашивать анализы в произвольной форме. "
+        "Ты — виртуальный помощник медицинской лаборатории. "
+        "Дай пользователю краткую и точную информацию по анализам. "
         "Вот данные наших анализов:\n"
         f"{analyses_list}\n\n"
-        "Если пользователь спрашивает про анализ, попытайся сопоставить его запрос с доступными анализами и предоставить информацию. "
         "Если анализ не найден, сообщи, что его нет в базе."
     )
 
@@ -115,7 +115,7 @@ def ask_openai(prompt, analyses):
     try:
         lab_context = get_lab_context(analyses)
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # При необходимости переключитесь на другую модель
+            model="gpt-4o-mini",  # При необходимости переключитесь на gpt-4-turbo
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": prompt},
@@ -132,17 +132,23 @@ def ask_openai(prompt, analyses):
 # Функции сравнения с конкурентами
 ##########################
 
-def extract_analysis_names_from_query(query, analyses):
+def extract_matched_analyses(query, analyses):
     """
-    Извлекает названия анализов из запроса, сравнивая его с именами анализов из нашей базы.
-    Возвращает список найденных названий.
+    Извлекает из запроса названия анализов, сравнивая каждую часть с данными из нашей базы.
+    Запрос разбивается по запятым или " и ". Возвращает строку с найденными названиями, разделёнными запятыми.
     """
-    normalized_query = normalize_text(query)
-    extracted = []
-    for name, price, timeframe in analyses:
-        if name in normalized_query:
-            extracted.append(name)
-    return extracted
+    if "," in query:
+        parts = [part.strip() for part in query.split(",")]
+    elif " и " in query:
+        parts = [part.strip() for part in query.split(" и ")]
+    else:
+        parts = [query.strip()]
+    matched = []
+    for part in parts:
+        for name, _, _ in analyses:
+            if part in name or get_close_matches(part, [name], n=1, cutoff=0.5):
+                matched.append(name)
+    return ", ".join(list(set(matched)))
 
 def find_best_match(query, competitor_data):
     """
@@ -157,19 +163,16 @@ def find_best_match(query, competitor_data):
                 return (name, lab, price, timeframe)
     return None
 
-def compare_with_competitors(query):
+def compare_with_competitors(matched_names):
     """
-    Сравнивает цены для анализов, извлеченных из запроса.
-    Вместо использования необработанного запроса, извлекаем имена анализов, используя данные из нашей базы.
+    Сравнивает цены по анализам, переданным в виде строки с названиями, разделёнными запятыми.
     """
     competitor_data = get_competitor_data()
-    our_analyses = get_all_analyses()
-    extracted_names = extract_analysis_names_from_query(query, our_analyses)
-    if not extracted_names:
+    if not matched_names:
         return "Не удалось извлечь названия анализов для сравнения."
-    
+    names = [name.strip() for name in matched_names.split(",")]
     results = []
-    for name in extracted_names:
+    for name in names:
         best = find_best_match(name, competitor_data)
         if best:
             comp_name, lab, comp_price, comp_timeframe = best
@@ -199,7 +202,7 @@ async def notify_admin_about_missing_request(query, user_id, context):
 
 async def process_response(response, user_message, user_id, context):
     """
-    Если ответ от OpenAI содержит фразы об отсутствии анализа, уведомляет оператора
+    Если ответ от OpenAI содержит фразы об отсутствии анализа, уведомляет администратора
     и возвращает шаблонный ответ.
     """
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
@@ -236,14 +239,13 @@ async def handle_message(update: Update, context):
     user_id = update.message.chat_id
     logger.info(f"Запрос от {user_id}: {user_message}")
 
-    # Если пользователь отправил "сравнить", используем последний сохранённый запрос
+    # Если пользователь отправил "сравнить", используем сохранённый список анализов из предыдущего запроса
     if "сравнить" in user_message:
         if user_id in pending_requests:
-            original_query = pending_requests[user_id]
-            comp_response = compare_with_competitors(original_query)
-            # Если сравнение не найдено, уведомляем администратора
+            saved_names = pending_requests[user_id]  # Это строка с названиями анализов, разделёнными запятыми
+            comp_response = compare_with_competitors(saved_names)
             if "не найдена" in comp_response.lower():
-                await notify_admin_about_missing_request(original_query, user_id, context)
+                await notify_admin_about_missing_request(saved_names, user_id, context)
                 comp_response += "\n\nИзвините, информация по конкурентам отсутствует. Запрос передан оператору."
             await update.message.reply_text(comp_response)
             return
@@ -251,21 +253,48 @@ async def handle_message(update: Update, context):
             await update.message.reply_text("Нет предыдущего запроса для сравнения.")
             return
 
-    # Сохраняем последний запрос пользователя для возможности сравнения
-    pending_requests[user_id] = user_message
-
+    # Получаем данные наших анализов
     analyses = get_all_analyses()
+    # Извлекаем названия анализов из запроса (с учетом нормализации)
+    extracted_names = extract_matched_analyses(user_message, analyses)
+    if extracted_names:
+        pending_requests[user_id] = extracted_names  # Сохраняем список анализов для сравнения
+    else:
+        pending_requests[user_id] = user_message  # Если ничего не найдено, сохраняем исходный запрос
+
     response = ask_openai(user_message, analyses)
     final_response = await process_response(response, user_message, user_id, context)
     
     # Если конкурентные данные есть, предлагаем сравнить цены
     competitor_data = get_competitor_data()
     if competitor_data:
-        final_response += "\n\nДля сравнения цен с конкурентами отправьте 'сравнить'."
+        final_response += "\n\nЕсли хотите сравнить цены с конкурентами, отправьте 'сравнить'."
     
     await update.message.reply_text(final_response)
 
+# Функция извлечения названий анализов из запроса
+def extract_matched_analyses(query, analyses):
+    """
+    Разбивает запрос по запятым или союзам, сравнивает каждую часть с названиями анализов из нашей базы.
+    Возвращает строку с найденными названиями, разделёнными запятыми.
+    """
+    if "," in query:
+        parts = [part.strip() for part in query.split(",")]
+    elif " и " in query:
+        parts = [part.strip() for part in query.split(" и ")]
+    else:
+        parts = [query.strip()]
+    matched = []
+    for part in parts:
+        for name, _, _ in analyses:
+            if part in name or get_close_matches(part, [name], n=1, cutoff=0.5):
+                matched.append(name)
+    return ", ".join(list(set(matched)))
+
+##########################
 # Основная функция
+##########################
+
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
