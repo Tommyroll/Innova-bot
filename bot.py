@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # Константы и настройки
-DB_FILE = "lab_data(2).db"  # Файл базы данных с нашими анализами и конкурентами
+DB_FILE = "lab_data(2).db"  # Файл базы данных с нашими анализами и данными конкурентов
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -132,6 +132,18 @@ def ask_openai(prompt, analyses):
 # Функции сравнения с конкурентами
 ##########################
 
+def extract_analysis_names_from_query(query, analyses):
+    """
+    Извлекает названия анализов из запроса, сравнивая его с именами анализов из нашей базы.
+    Возвращает список найденных названий.
+    """
+    normalized_query = normalize_text(query)
+    extracted = []
+    for name, price, timeframe in analyses:
+        if name in normalized_query:
+            extracted.append(name)
+    return extracted
+
 def find_best_match(query, competitor_data):
     """
     Использует get_close_matches для поиска наиболее похожего анализа среди данных конкурентов.
@@ -147,20 +159,23 @@ def find_best_match(query, competitor_data):
 
 def compare_with_competitors(query):
     """
-    Сравнивает цены для каждого анализа, если в запросе перечислено несколько анализов,
-    разделенных запятыми. Возвращает сравнительный анализ.
+    Сравнивает цены для анализов, извлеченных из запроса.
+    Вместо использования необработанного запроса, извлекаем имена анализов, используя данные из нашей базы.
     """
     competitor_data = get_competitor_data()
-    # Если запрос содержит запятые, разбиваем его
-    parts = [part.strip() for part in query.split(",")] if "," in query else [query]
+    our_analyses = get_all_analyses()
+    extracted_names = extract_analysis_names_from_query(query, our_analyses)
+    if not extracted_names:
+        return "Не удалось извлечь названия анализов для сравнения."
+    
     results = []
-    for part in parts:
-        best = find_best_match(part, competitor_data)
+    for name in extracted_names:
+        best = find_best_match(name, competitor_data)
         if best:
-            name, lab, price, timeframe = best
-            results.append(f"Конкурент ({lab}): {name} — {price} KZT, Срок: {timeframe}")
+            comp_name, lab, comp_price, comp_timeframe = best
+            results.append(f"Конкурент ({lab}): {comp_name} — {comp_price} KZT, Срок: {comp_timeframe}")
         else:
-            results.append(f"По запросу '{part}' информация по конкурентам не найдена.")
+            results.append(f"Для анализа '{name}' информация по конкурентам не найдена.")
     return "\n".join(results)
 
 ##########################
@@ -184,7 +199,7 @@ async def notify_admin_about_missing_request(query, user_id, context):
 
 async def process_response(response, user_message, user_id, context):
     """
-    Если ответ от OpenAI содержит фразы о том, что анализ не найден, уведомляет оператора
+    Если ответ от OpenAI содержит фразы об отсутствии анализа, уведомляет оператора
     и возвращает шаблонный ответ.
     """
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
@@ -221,7 +236,7 @@ async def handle_message(update: Update, context):
     user_id = update.message.chat_id
     logger.info(f"Запрос от {user_id}: {user_message}")
 
-    # Если пользователь отправил "сравнить", запускаем сравнение по последнему сохранённому запросу
+    # Если пользователь отправил "сравнить", используем последний сохранённый запрос
     if "сравнить" in user_message:
         if user_id in pending_requests:
             original_query = pending_requests[user_id]
@@ -236,17 +251,17 @@ async def handle_message(update: Update, context):
             await update.message.reply_text("Нет предыдущего запроса для сравнения.")
             return
 
-    # Сохраняем последний запрос пользователя (для возможности сравнения)
+    # Сохраняем последний запрос пользователя для возможности сравнения
     pending_requests[user_id] = user_message
 
     analyses = get_all_analyses()
     response = ask_openai(user_message, analyses)
     final_response = await process_response(response, user_message, user_id, context)
-
-    # Если конкурентные данные есть, предлагаем сравнить цены с конкурентами
+    
+    # Если конкурентные данные есть, предлагаем сравнить цены
     competitor_data = get_competitor_data()
     if competitor_data:
-        final_response += "\n\nЕсли хотите сравнить цены с конкурентами, отправьте 'сравнить'."
+        final_response += "\n\nДля сравнения цен с конкурентами отправьте 'сравнить'."
     
     await update.message.reply_text(final_response)
 
