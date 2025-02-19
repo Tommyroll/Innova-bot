@@ -188,12 +188,22 @@ async def process_response(response, user_message, user_id, context):
 # Функции интеграции Google Vision
 ##########################
 
+from google.oauth2 import service_account
+
 def detect_text_from_image(image_path):
     """
     Отправляет изображение в Google Vision API для распознавания текста.
+    Загружает учетные данные из файла, путь к которому указан в переменной
+    окружения GOOGLE_APPLICATION_CREDENTIALS.
     """
     try:
-        client = vision.ImageAnnotatorClient()
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if not credentials_path:
+            logger.error("Переменная GOOGLE_APPLICATION_CREDENTIALS не установлена.")
+            return ""
+        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        client = vision.ImageAnnotatorClient(credentials=credentials)
+        
         with io.open(image_path, 'rb') as image_file:
             content = image_file.read()
         image = vision.Image(content=content)
