@@ -235,8 +235,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not extracted_tests:
         await update.message.reply_text(
-            "Из направления не удалось определить анализы, входящие в наш перечень. "
-            "Возможно, в направлении указана другая информация."
+            "Из направления не удалось определить анализы, входящие в наш перечень. Возможно, в направлении указана другая информация."
         )
         return
 
@@ -247,7 +246,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Найденные анализы: {extracted_tests}\n\n"
         f"Ответ:\n{response}"
     )
-    await update.message.reply_text(final_message)
+    
+    # Ограничиваем длину сообщения до 4096 символов
+    if len(final_message) > 4096:
+        final_message = final_message[:4090] + "..."
+    
+    try:
+        await update.message.reply_text(final_message)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке сообщения: {e}")
+
 
 ##########################
 # Обработчики команд и сообщений
