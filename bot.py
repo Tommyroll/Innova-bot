@@ -11,9 +11,12 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+import io
+from google.cloud import vision
+import tempfile
 
 # Константы и настройки
-DB_FILE = "lab_data(2).db"  # Файл базы данных с нашими анализами и конкурентами
+DB_FILE = "lab_data(2).db"  # Файл базы данных с анализами и конкурентами
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -35,11 +38,10 @@ openai.api_key = OPENAI_API_KEY
 pending_requests = {}
 
 ##########################
-# Функции работы с базой данных
+# Функции работы с базой данных и нормализации
 ##########################
 
 def connect_to_db():
-    """Подключается к базе данных SQLite."""
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         return conn
@@ -48,7 +50,6 @@ def connect_to_db():
         return None
 
 def get_all_analyses():
-    """Получает все анализы из таблицы analyses."""
     conn = connect_to_db()
     if not conn:
         return []
@@ -63,7 +64,6 @@ def get_all_analyses():
         return []
 
 def get_competitor_data():
-    """Получает данные из таблицы competitor_prices."""
     conn = connect_to_db()
     if not conn:
         return []
@@ -77,15 +77,7 @@ def get_competitor_data():
         logger.error(f"Ошибка при загрузке данных конкурентов: {e}")
         return []
 
-##########################
-# Функции нормализации текста
-##########################
-
 def normalize_text(text):
-    """
-    Приводит текст к нижнему регистру и заменяет кириллическую "б" на латинскую "b".
-    Это помогает сопоставлять, например, "витамин б" и "витамин B".
-    """
     text = text.replace("б", "b")
     return text.lower()
 
@@ -94,9 +86,6 @@ def normalize_text(text):
 ##########################
 
 def get_lab_context(analyses):
-    """
-    Формирует системный контекст для OpenAI с перечнем наших анализов.
-    """
     analyses_list = "\n".join(
         [f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses]
     )
@@ -109,16 +98,15 @@ def get_lab_context(analyses):
     )
 
 def ask_openai(prompt, analyses):
-    """
-    Отправляет запрос в OpenAI с контекстом лаборатории и возвращает сгенерированный ответ.
-    """
     try:
         lab_context = get_lab_context(analyses)
+        # В запрос к OpenAI включаем инструкцию: если есть анализы, которых нет в базе, сообщи об этом.
+        full_prompt = prompt + "\n\nЕсли в запросе упомянуты анализы, которых нет в нашей базе, сообщи, что информация по ним отсутствует."
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",  # При необходимости переключитесь на gpt-4-turbo
             messages=[
                 {"role": "system", "content": lab_context},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": full_prompt},
             ],
             max_tokens=400,
             temperature=0.5,
@@ -134,8 +122,8 @@ def ask_openai(prompt, analyses):
 
 def extract_matched_analyses(query, analyses):
     """
-    Извлекает из запроса названия анализов, сравнивая каждую часть с данными из нашей базы.
-    Запрос разбивается по запятым или " и ". Возвращает строку с найденными названиями, разделёнными запятыми.
+    Извлекает названия анализов, сравнивая части запроса с данными из базы.
+    Если часть запроса не соответствует ни одному анализу из базы, она игнорируется.
     """
     if "," in query:
         parts = [part.strip() for part in query.split(",")]
@@ -151,10 +139,6 @@ def extract_matched_analyses(query, analyses):
     return ", ".join(list(set(matched)))
 
 def find_best_match(query, competitor_data):
-    """
-    Использует get_close_matches для поиска наиболее похожего анализа среди данных конкурентов.
-    Порог схожести установлен на 0.5.
-    """
     competitor_names = [name for name, _, _, _ in competitor_data]
     matches = get_close_matches(query, competitor_names, n=1, cutoff=0.5)
     if matches:
@@ -164,9 +148,6 @@ def find_best_match(query, competitor_data):
     return None
 
 def compare_with_competitors(matched_names):
-    """
-    Сравнивает цены по анализам, переданным в виде строки с названиями, разделёнными запятыми.
-    """
     competitor_data = get_competitor_data()
     if not matched_names:
         return "Не удалось извлечь названия анализов для сравнения."
@@ -186,9 +167,6 @@ def compare_with_competitors(matched_names):
 ##########################
 
 async def notify_admin_about_missing_request(query, user_id, context):
-    """
-    Отправляет уведомление администратору о том, что запрос не обработан.
-    """
     pending_requests[user_id] = query
     message = (
         f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
@@ -201,25 +179,84 @@ async def notify_admin_about_missing_request(query, user_id, context):
         logger.error(f"Ошибка при отправке уведомления: {e}")
 
 async def process_response(response, user_message, user_id, context):
-    """
-    Если ответ от OpenAI содержит фразы об отсутствии анализа, уведомляет администратора
-    и возвращает шаблонный ответ.
-    """
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
         await notify_admin_about_missing_request(user_message, user_id, context)
         return "Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения."
     return response
 
 ##########################
+# Функции интеграции Google Vision
+##########################
+
+def detect_text_from_image(image_path):
+    """
+    Отправляет изображение в Google Vision API для распознавания текста.
+    """
+    try:
+        client = vision.ImageAnnotatorClient()
+        with io.open(image_path, 'rb') as image_file:
+            content = image_file.read()
+        image = vision.Image(content=content)
+        response = client.text_detection(image=image)
+        if response.error.message:
+            logger.error(f"Google Vision API error: {response.error.message}")
+            return ""
+        texts = response.text_annotations
+        if texts:
+            return texts[0].description
+        return ""
+    except Exception as e:
+        logger.error(f"Ошибка при обработке изображения: {e}")
+        return ""
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик фотографий:
+    1. Скачивает изображение, отправленное пользователем.
+    2. Распознаёт текст через Google Vision.
+    3. Извлекает из распознанного текста только те анализы, которые есть в базе.
+    4. Если анализы не найдены, сообщает об этом.
+    5. Иначе передаёт полученные данные в OpenAI и отправляет результат пользователю.
+    """
+    photo = update.message.photo[-1]  # Выбираем наилучшее качество
+    file = await photo.get_file()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        temp_file_path = tmp_file.name
+
+    await file.download_to_drive(custom_path=temp_file_path)
+    
+    extracted_text = detect_text_from_image(temp_file_path)
+    os.remove(temp_file_path)  # Удаляем временный файл
+
+    analyses = get_all_analyses()
+    # Извлекаем только те анализы, которые есть в базе
+    extracted_tests = extract_matched_analyses(normalize_text(extracted_text), analyses)
+    
+    if not extracted_tests:
+        await update.message.reply_text(
+            "Из направления не удалось определить анализы, входящие в наш перечень. "
+            "Возможно, в направлении указана другая информация."
+        )
+        return
+
+    # Формируем запрос к OpenAI с инструкцией сообщить, если каких-то анализов нет
+    response = ask_openai(f"Пожалуйста, предоставьте информацию по анализам: {extracted_tests}.", analyses)
+    final_message = (
+        f"Распознанный текст:\n{extracted_text}\n\n"
+        f"Найденные анализы: {extracted_tests}\n\n"
+        f"Ответ:\n{response}"
+    )
+    await update.message.reply_text(final_message)
+
+##########################
 # Обработчики команд и сообщений
 ##########################
 
-# Обработчик команды /start
-async def start(update: Update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
 
-# Обработчик команды /reply для оператора
-async def reply(update: Update, context):
+async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.message.chat_id) != ADMIN_TELEGRAM_ID:
         return
     try:
@@ -233,16 +270,14 @@ async def reply(update: Update, context):
         logger.error(f"Ошибка в команде /reply: {e}")
         await update.message.reply_text("Неправильный формат команды. Используйте: /reply <user_id> <ответ>")
 
-# Основной обработчик сообщений
-async def handle_message(update: Update, context):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = normalize_text(update.message.text)
     user_id = update.message.chat_id
     logger.info(f"Запрос от {user_id}: {user_message}")
 
-    # Если пользователь отправил "сравнить", используем сохранённый список анализов из предыдущего запроса
     if "сравнить" in user_message:
         if user_id in pending_requests:
-            saved_names = pending_requests[user_id]  # Это строка с названиями анализов, разделёнными запятыми
+            saved_names = pending_requests[user_id]
             comp_response = compare_with_competitors(saved_names)
             if "не найдена" in comp_response.lower():
                 await notify_admin_about_missing_request(saved_names, user_id, context)
@@ -253,43 +288,21 @@ async def handle_message(update: Update, context):
             await update.message.reply_text("Нет предыдущего запроса для сравнения.")
             return
 
-    # Получаем данные наших анализов
     analyses = get_all_analyses()
-    # Извлекаем названия анализов из запроса (с учетом нормализации)
     extracted_names = extract_matched_analyses(user_message, analyses)
     if extracted_names:
-        pending_requests[user_id] = extracted_names  # Сохраняем список анализов для сравнения
+        pending_requests[user_id] = extracted_names
     else:
-        pending_requests[user_id] = user_message  # Если ничего не найдено, сохраняем исходный запрос
+        pending_requests[user_id] = user_message
 
     response = ask_openai(user_message, analyses)
     final_response = await process_response(response, user_message, user_id, context)
     
-    # Если конкурентные данные есть, предлагаем сравнить цены
     competitor_data = get_competitor_data()
     if competitor_data:
         final_response += "\n\nЕсли хотите сравнить цены с конкурентами, отправьте 'сравнить'."
     
     await update.message.reply_text(final_response)
-
-# Функция извлечения названий анализов из запроса
-def extract_matched_analyses(query, analyses):
-    """
-    Разбивает запрос по запятым или союзам, сравнивает каждую часть с названиями анализов из нашей базы.
-    Возвращает строку с найденными названиями, разделёнными запятыми.
-    """
-    if "," in query:
-        parts = [part.strip() for part in query.split(",")]
-    elif " и " in query:
-        parts = [part.strip() for part in query.split(" и ")]
-    else:
-        parts = [query.strip()]
-    matched = []
-    for part in parts:
-        for name, _, _ in analyses:
-            if part in name or get_close_matches(part, [name], n=1, cutoff=0.5):
-                matched.append(name)
-    return ", ".join(list(set(matched)))
 
 ##########################
 # Основная функция
@@ -299,6 +312,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reply", reply))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # Обработчик фотографий
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
