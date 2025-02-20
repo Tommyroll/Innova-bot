@@ -1,7 +1,8 @@
-import logging
+import logging 
 import os
 import sqlite3
 import openai
+import re
 from difflib import get_close_matches
 from telegram import Update
 from telegram.ext import (
@@ -14,6 +15,8 @@ from telegram.ext import (
 import io
 from google.cloud import vision
 import tempfile
+import json
+from google.oauth2 import service_account
 
 # Константы и настройки
 DB_FILE = "lab_data(2).db"  # Файл базы данных с анализами и конкурентами
@@ -100,7 +103,6 @@ def get_lab_context(analyses):
 def ask_openai(prompt, analyses):
     try:
         lab_context = get_lab_context(analyses)
-        # В запрос к OpenAI включаем инструкцию: если есть анализы, которых нет в базе, сообщи об этом.
         full_prompt = prompt + "\n\nЕсли в запросе упомянуты анализы, которых нет в нашей базе, сообщи, что информация по ним отсутствует."
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",  # При необходимости переключитесь на gpt-4-turbo
@@ -120,22 +122,18 @@ def ask_openai(prompt, analyses):
 # Функции сравнения с конкурентами
 ##########################
 
+# Новая версия функции для извлечения анализов с использованием регулярных выражений.
 def extract_matched_analyses(query, analyses):
     """
-    Извлекает названия анализов, сравнивая части запроса с данными из базы.
-    Если часть запроса не соответствует ни одному анализу из базы, она игнорируется.
+    Для каждого анализа из базы проверяет, встречается ли его название в OCR-тексте как отдельное слово или фраза.
+    Возвращает строку с найденными названиями, разделёнными запятыми.
     """
-    if "," in query:
-        parts = [part.strip() for part in query.split(",")]
-    elif " и " in query:
-        parts = [part.strip() for part in query.split(" и ")]
-    else:
-        parts = [query.strip()]
     matched = []
-    for part in parts:
-        for name, _, _ in analyses:
-            if part in name or get_close_matches(part, [name], n=1, cutoff=0.5):
-                matched.append(name)
+    for name, _, _ in analyses:
+        # Используем регулярное выражение для точного совпадения с границами слова
+        pattern = r'\b' + re.escape(name) + r'\b'
+        if re.search(pattern, query):
+            matched.append(name)
     return ", ".join(list(set(matched)))
 
 def find_best_match(query, competitor_data):
@@ -188,9 +186,6 @@ async def process_response(response, user_message, user_id, context):
 # Функции интеграции Google Vision
 ##########################
 
-import json
-from google.oauth2 import service_account
-
 def detect_text_from_image(image_path):
     """
     Отправляет изображение в Google Vision API для распознавания текста.
@@ -220,7 +215,6 @@ def detect_text_from_image(image_path):
         logger.error(f"Ошибка при обработке изображения: {e}")
         return ""
 
-
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработчик фотографий:
@@ -242,7 +236,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.remove(temp_file_path)  # Удаляем временный файл
 
     analyses = get_all_analyses()
-    # Извлекаем только те анализы, которые есть в базе
+    # Извлекаем только те анализы, которые есть в базе с помощью нового регулярного поиска
     extracted_tests = extract_matched_analyses(normalize_text(extracted_text), analyses)
     
     if not extracted_tests:
@@ -251,7 +245,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Формируем запрос к OpenAI с инструкцией сообщить, если каких-то анализов нет
     response = ask_openai(f"Пожалуйста, предоставьте информацию по анализам: {extracted_tests}.", analyses)
     final_message = (
         f"Распознанный текст:\n{extracted_text}\n\n"
@@ -259,7 +252,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Ответ:\n{response}"
     )
     
-    # Ограничиваем длину сообщения до 4096 символов
     if len(final_message) > 4096:
         final_message = final_message[:4090] + "..."
     
@@ -267,7 +259,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(final_message)
     except Exception as e:
         logger.error(f"Ошибка при отправке сообщения: {e}")
-
 
 ##########################
 # Обработчики команд и сообщений
