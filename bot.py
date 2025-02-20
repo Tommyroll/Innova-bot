@@ -61,6 +61,7 @@ def get_all_analyses():
         cursor.execute("SELECT name, price, timeframe FROM analyses")
         results = cursor.fetchall()
         conn.close()
+        # Просто приводим названия к нижнему регистру
         return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при извлечении данных из БД: {e}")
@@ -81,7 +82,9 @@ def get_competitor_data():
         return []
 
 def normalize_text(text):
-    text = text.replace("б", "b")
+    """
+    Приводит текст к нижнему регистру для обеспечения корректного сопоставления.
+    """
     return text.lower()
 
 ##########################
@@ -122,19 +125,16 @@ def ask_openai(prompt, analyses):
 # Функции сравнения с конкурентами
 ##########################
 
-# Новая версия функции для извлечения анализов с использованием регулярных выражений.
 def extract_matched_analyses(query, analyses):
     """
     Извлекает названия анализов, сравнивая отдельные слова OCR-текста с словами из названий анализов.
     Возвращает строку с найденными названиями, разделёнными запятыми.
     """
-    import re
     matched = set()
     # Получаем список слов из OCR-текста (без знаков препинания)
     query_tokens = re.findall(r'\w+', query)
     for name, _, _ in analyses:
         name_tokens = re.findall(r'\w+', name)
-        # Если хотя бы одно слово из названия анализа содержится (точно или почти) в OCR-тексте, добавляем анализ
         for n_token in name_tokens:
             for token in query_tokens:
                 if token == n_token or get_close_matches(token, [n_token], n=1, cutoff=0.8):
@@ -143,9 +143,6 @@ def extract_matched_analyses(query, analyses):
             else:
                 continue
             break
-    return ", ".join(matched)
-    
- # Логирование для отладки
     logger.info(f"OCR текст: {query_tokens}, найденные анализы: {matched}")
     return ", ".join(matched)
 
@@ -249,7 +246,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.remove(temp_file_path)  # Удаляем временный файл
 
     analyses = get_all_analyses()
-    # Извлекаем только те анализы, которые есть в базе с помощью нового регулярного поиска
+    # Извлекаем только те анализы, которые есть в базе
     extracted_tests = extract_matched_analyses(normalize_text(extracted_text), analyses)
     
     if not extracted_tests:
