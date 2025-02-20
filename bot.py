@@ -42,7 +42,7 @@ pending_requests = {}
 # Глоссарий синонимов: ключ – вариант, значение – каноническое название анализа (как записано в базе)
 SYNONYMS = {
     "рф": "рф-суммарный",
-    "иммуноглобулин e": "ige",
+    "иммуноглобулин e": "ige", "ig e",
     "иге": "ige",
     # Добавляйте другие синонимы по мере необходимости
 }
@@ -199,8 +199,7 @@ async def notify_admin_about_missing_request(query, user_id, context):
 async def process_response(response, user_message, user_id, context):
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
         await notify_admin_about_missing_request(user_message, user_id, context)
-        return ("Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения. "
-                "Вы можете напрямую обратиться по телефону +77073145.")
+        return ("Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения. Вы можете напрямую обратиться по телефону +77073145. ")
     return response
 
 ##########################
