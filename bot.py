@@ -125,16 +125,29 @@ def ask_openai(prompt, analyses):
 # Новая версия функции для извлечения анализов с использованием регулярных выражений.
 def extract_matched_analyses(query, analyses):
     """
-    Для каждого анализа из базы проверяет, встречается ли его название в OCR-тексте как отдельное слово или фраза.
+    Извлекает названия анализов, сравнивая отдельные слова OCR-текста с словами из названий анализов.
     Возвращает строку с найденными названиями, разделёнными запятыми.
     """
-    matched = []
+    import re
+    matched = set()
+    # Получаем список слов из OCR-текста (без знаков препинания)
+    query_tokens = re.findall(r'\w+', query)
     for name, _, _ in analyses:
-        # Используем регулярное выражение для точного совпадения с границами слова
-        pattern = r'\b' + re.escape(name) + r'\b'
-        if re.search(pattern, query):
-            matched.append(name)
-    return ", ".join(list(set(matched)))
+        name_tokens = re.findall(r'\w+', name)
+        # Если хотя бы одно слово из названия анализа содержится (точно или почти) в OCR-тексте, добавляем анализ
+        for n_token in name_tokens:
+            for token in query_tokens:
+                if token == n_token or get_close_matches(token, [n_token], n=1, cutoff=0.8):
+                    matched.add(name)
+                    break
+            else:
+                continue
+            break
+    return ", ".join(matched)
+    
+ # Логирование для отладки
+    logger.info(f"OCR текст: {query_tokens}, найденные анализы: {matched}")
+    return ", ".join(matched)
 
 def find_best_match(query, competitor_data):
     competitor_names = [name for name, _, _, _ in competitor_data]
