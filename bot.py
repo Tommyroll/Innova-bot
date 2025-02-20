@@ -16,6 +16,7 @@ import io
 import tempfile
 import json
 from google.oauth2 import service_account
+from google.cloud import vision
 
 # Константы и настройки
 DB_FILE = "lab_data(2).db"  # Файл базы данных с анализами и конкурентами
@@ -45,9 +46,6 @@ SYNONYMS = {
     "иммуноглобулин e": "ige",
     "иге": "ige",
     "ig e": "ige"
-}
-
-    # Добавляйте другие синонимы по мере необходимости
 }
 
 ##########################
@@ -202,7 +200,8 @@ async def notify_admin_about_missing_request(query, user_id, context):
 async def process_response(response, user_message, user_id, context):
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
         await notify_admin_about_missing_request(user_message, user_id, context)
-        return ("Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения. Вы можете напрямую обратиться по телефону +77073145. ")
+        return ("Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения. "
+                "Вы можете напрямую обратиться по телефону +77073145.")
     return response
 
 ##########################
