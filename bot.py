@@ -13,7 +13,6 @@ from telegram.ext import (
     filters
 )
 import io
-from google.cloud import vision
 import tempfile
 import json
 from google.oauth2 import service_account
@@ -40,6 +39,14 @@ openai.api_key = OPENAI_API_KEY
 # Глобальный словарь для хранения извлечённых названий анализов из последнего запроса
 pending_requests = {}
 
+# Глоссарий синонимов: ключ – вариант, значение – каноническое название анализа (как записано в базе)
+SYNONYMS = {
+    "рф": "рф-суммарный",
+    "иммуноглобулин e": "ige",
+    "иге": "ige",
+    # Добавляйте другие синонимы по мере необходимости
+}
+
 ##########################
 # Функции работы с базой данных и нормализации
 ##########################
@@ -61,7 +68,7 @@ def get_all_analyses():
         cursor.execute("SELECT name, price, timeframe FROM analyses")
         results = cursor.fetchall()
         conn.close()
-        # Просто приводим названия к нижнему регистру
+        # Приводим названия к нижнему регистру для корректного сопоставления
         return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при извлечении данных из БД: {e}")
@@ -127,23 +134,26 @@ def ask_openai(prompt, analyses):
 
 def extract_matched_analyses(query, analyses):
     """
-    Извлекает названия анализов, сравнивая отдельные слова OCR-текста с словами из названий анализов.
-    Возвращает строку с найденными названиями, разделёнными запятыми.
+    Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
+    Перед сравнением каждое слово преобразуется по глоссарию синонимов.
+    Возвращает строку с найденными анализами, разделёнными запятыми.
     """
     matched = set()
-    # Получаем список слов из OCR-текста (без знаков препинания)
+    # Получаем список слов из текста (без знаков препинания)
     query_tokens = re.findall(r'\w+', query)
+    # Применяем глоссарий: заменяем каждое слово на канонический вариант, если указано в SYNONYMS
+    canonical_tokens = [SYNONYMS.get(token, token) for token in query_tokens]
     for name, _, _ in analyses:
         name_tokens = re.findall(r'\w+', name)
         for n_token in name_tokens:
-            for token in query_tokens:
+            for token in canonical_tokens:
                 if token == n_token or get_close_matches(token, [n_token], n=1, cutoff=0.8):
                     matched.add(name)
                     break
             else:
                 continue
             break
-    logger.info(f"OCR текст: {query_tokens}, найденные анализы: {matched}")
+    logger.info(f"OCR текст: {query_tokens}, преобразованные токены: {canonical_tokens}, найденные анализы: {matched}")
     return ", ".join(matched)
 
 def find_best_match(query, competitor_data):
@@ -189,86 +199,31 @@ async def notify_admin_about_missing_request(query, user_id, context):
 async def process_response(response, user_message, user_id, context):
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
         await notify_admin_about_missing_request(user_message, user_id, context)
-        return "Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения."
+        return ("Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения. "
+                "Вы можете напрямую обратиться по телефону +77073145.")
     return response
 
 ##########################
-# Функции интеграции Google Vision
+# Функции интеграции с фотографиями
 ##########################
-
-def detect_text_from_image(image_path):
-    """
-    Отправляет изображение в Google Vision API для распознавания текста.
-    Использует учетные данные из переменной окружения GOOGLE_SERVICE_ACCOUNT_JSON.
-    """
-    try:
-        credentials_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-        if not credentials_json:
-            logger.error("Переменная GOOGLE_SERVICE_ACCOUNT_JSON не установлена.")
-            return ""
-        credentials_info = json.loads(credentials_json)
-        credentials = service_account.Credentials.from_service_account_info(credentials_info)
-        client = vision.ImageAnnotatorClient(credentials=credentials)
-        
-        with io.open(image_path, 'rb') as image_file:
-            content = image_file.read()
-        image = vision.Image(content=content)
-        response = client.text_detection(image=image)
-        if response.error.message:
-            logger.error(f"Google Vision API error: {response.error.message}")
-            return ""
-        texts = response.text_annotations
-        if texts:
-            return texts[0].description
-        return ""
-    except Exception as e:
-        logger.error(f"Ошибка при обработке изображения: {e}")
-        return ""
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработчик фотографий:
-    1. Скачивает изображение, отправленное пользователем.
-    2. Распознаёт текст через Google Vision.
-    3. Извлекает из распознанного текста только те анализы, которые есть в базе.
-    4. Если анализы не найдены, сообщает об этом.
-    5. Иначе передаёт полученные данные в OpenAI и отправляет результат пользователю.
+    1. Пересылает фото, отправленное пользователем, оператору для ручной обработки.
+    2. Уведомляет клиента, что запрос направлен оператору.
     """
-    photo = update.message.photo[-1]  # Выбираем наилучшее качество
-    file = await photo.get_file()
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-        temp_file_path = tmp_file.name
-
-    await file.download_to_drive(custom_path=temp_file_path)
-    
-    extracted_text = detect_text_from_image(temp_file_path)
-    os.remove(temp_file_path)  # Удаляем временный файл
-
-    analyses = get_all_analyses()
-    # Извлекаем только те анализы, которые есть в базе
-    extracted_tests = extract_matched_analyses(normalize_text(extracted_text), analyses)
-    
-    if not extracted_tests:
-        await update.message.reply_text(
-            "Из направления не удалось определить анализы, входящие в наш перечень. Возможно, в направлении указана другая информация."
-        )
-        return
-
-    response = ask_openai(f"Пожалуйста, предоставьте информацию по анализам: {extracted_tests}.", analyses)
-    final_message = (
-        f"Распознанный текст:\n{extracted_text}\n\n"
-        f"Найденные анализы: {extracted_tests}\n\n"
-        f"Ответ:\n{response}"
-    )
-    
-    if len(final_message) > 4096:
-        final_message = final_message[:4090] + "..."
-    
     try:
-        await update.message.reply_text(final_message)
+        # Пересылаем сообщение (фото) оператору
+        await update.message.forward(chat_id=ADMIN_TELEGRAM_ID)
+        # Отправляем клиенту уведомление
+        await update.message.reply_text(
+            "Ваш запрос получен и направлен оператору для ручной обработки. "
+            "Вы можете напрямую обратиться по телефону +77073145."
+        )
     except Exception as e:
-        logger.error(f"Ошибка при отправке сообщения: {e}")
+        logger.error(f"Ошибка при пересылке фото: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке вашего запроса.")
 
 ##########################
 # Обработчики команд и сообщений
