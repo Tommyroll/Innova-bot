@@ -52,7 +52,6 @@ def apply_synonyms(text):
     Заменяет в тексте все вхождения синонимов на канонические названия.
     """
     for syn, canon in SYNONYMS.items():
-        # Замена с учетом границ слова, игнорируя регистр
         text = re.sub(r'\b' + re.escape(syn) + r'\b', canon, text, flags=re.IGNORECASE)
     return text
 
@@ -95,7 +94,7 @@ def get_competitor_data():
 
 def normalize_text(text):
     """
-    Приводит текст к нижнему регистру.
+    Приводит текст к нижнему регистру для обеспечения корректного сопоставления.
     """
     return text.lower()
 
@@ -109,7 +108,7 @@ def ask_openai(prompt, analyses):
         lab_context = get_lab_context(analyses)
         full_prompt = prompt + "\n\nЕсли в запросе упомянуты анализы, которых нет в нашей базе, сообщи, что информация по ним отсутствует."
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # Или gpt-4-turbo, если требуется
+            model="gpt-4o-mini",  # Или gpt-4-turbo
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": full_prompt},
@@ -126,11 +125,13 @@ def extract_matched_analyses(query, analyses):
     """
     Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
     Перед сравнением применяется глоссарий синонимов.
+    Если в исходном тексте встречаются критические ключевые слова, добавляем канонический вариант.\n
+    Возвращает строку с найденными анализами, разделёнными запятыми.
     """
     matched = set()
-    # Сначала применяем синонимы ко всему тексту
-    query = apply_synonyms(query)
-    query_tokens = re.findall(r'\w+', query)
+    # Применяем синонимы ко всему тексту
+    query_syn = apply_synonyms(query)
+    query_tokens = re.findall(r'\w+', query_syn)
     for name, _, _ in analyses:
         name_tokens = re.findall(r'\w+', name)
         for n_token in name_tokens:
@@ -141,6 +142,11 @@ def extract_matched_analyses(query, analyses):
             else:
                 continue
             break
+    # Дополнительная проверка для критических случаев
+    if "рф" in re.findall(r'\w+', query) and "рф-суммарный" not in matched:
+        matched.add("рф-суммарный")
+    if ("иммуноглобулин" in query or "иммуноглобулин e" in query or "иге" in query) and "ige" not in matched:
+        matched.add("ige")
     logger.info(f"OCR текст: {query_tokens}, найденные анализы: {matched}")
     return ", ".join(matched)
 
@@ -215,25 +221,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     а клиент получает уведомление о том, что запрос направлен оператору.
     """
     try:
-        # Получаем ID фото
         photo = update.message.photo[-1]
         file = await photo.get_file()
-        # Формируем информацию о клиенте: если контакт отправлен, используем его, иначе username или ID
-        phone_info = "Номер не указан"
+        # Формируем информацию о клиенте: chat ID и username, если телефон недоступен
+        user = update.message.from_user
+        client_info = f"Chat ID: {update.message.chat.id}"
+        if user.username:
+            client_info += f", Username: {user.username}"
+        # Если клиент отправил контакт, используем его номер
         if update.message.contact and update.message.contact.phone_number:
-            phone_info = update.message.contact.phone_number
-        elif update.message.from_user.username:
-            phone_info = update.message.from_user.username
-        caption = f"Фото от клиента {update.message.chat.id}\nТелефон/Юзернейм: {phone_info}"
-        # Пересылаем фото оператору
+            client_info += f", Телефон: {update.message.contact.phone_number}"
+        caption = f"Фото от клиента:\n{client_info}"
         await update.message.forward(chat_id=ADMIN_TELEGRAM_ID)
-        # Отправляем оператору дополнительное сообщение с информацией о клиенте
         await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=caption)
-        # Уведомляем клиента
-        await update.message.reply_text(
-            "Ваш запрос получен и направлен оператору для ручной обработки. "
-            "Вы можете напрямую обратиться по телефону +77073145."
-        )
+        await update.message.reply_text("Ваш запрос получен и направлен оператору для ручной обработки. "
+                                          "Вы можете напрямую обратиться по телефону +77073145.")
     except Exception as e:
         logger.error(f"Ошибка при пересылке фото: {e}")
         await update.message.reply_text("Произошла ошибка при обработке вашего запроса.")
@@ -255,7 +257,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(temp_file_path)
         text = transcript.get("text", "")
         await update.message.reply_text(f"Распознанный текст: {text}")
-        # Обрабатываем расшифрованный текст как обычный текстовый запрос
         update.message.text = text
         await handle_message(update, context)
     except Exception as e:
