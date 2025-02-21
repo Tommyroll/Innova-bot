@@ -1,4 +1,4 @@
-import logging 
+import logging
 import os
 import sqlite3
 import openai
@@ -15,6 +15,7 @@ from telegram.ext import (
 import io
 import tempfile
 import json
+import requests
 from google.oauth2 import service_account
 from google.cloud import vision
 
@@ -30,9 +31,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_PATH = DB_FILE
-
-# Telegram ID администратора (ваш личный Telegram ID)
-ADMIN_TELEGRAM_ID = "5241327545"
+ADMIN_TELEGRAM_ID = "5241327545"  # Ваш Telegram ID
 
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
@@ -48,9 +47,14 @@ SYNONYMS = {
     "ig e": "ige"
 }
 
-##########################
-# Функции работы с базой данных и нормализации
-##########################
+def apply_synonyms(text):
+    """
+    Заменяет в тексте все вхождения синонимов на канонические названия.
+    """
+    for syn, canon in SYNONYMS.items():
+        # Замена с учетом границ слова, игнорируя регистр
+        text = re.sub(r'\b' + re.escape(syn) + r'\b', canon, text, flags=re.IGNORECASE)
+    return text
 
 def connect_to_db():
     try:
@@ -69,7 +73,7 @@ def get_all_analyses():
         cursor.execute("SELECT name, price, timeframe FROM analyses")
         results = cursor.fetchall()
         conn.close()
-        # Приводим названия к нижнему регистру для корректного сопоставления
+        # Приводим названия к нижнему регистру
         return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при извлечении данных из БД: {e}")
@@ -91,32 +95,21 @@ def get_competitor_data():
 
 def normalize_text(text):
     """
-    Приводит текст к нижнему регистру для обеспечения корректного сопоставления.
+    Приводит текст к нижнему регистру.
     """
     return text.lower()
 
-##########################
-# Функции для OpenAI
-##########################
-
 def get_lab_context(analyses):
-    analyses_list = "\n".join(
-        [f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses]
-    )
-    return (
-        "Ты — виртуальный помощник медицинской лаборатории. "
-        "Дай пользователю краткую и точную информацию по анализам. "
-        "Вот данные наших анализов:\n"
-        f"{analyses_list}\n\n"
-        "Если анализ не найден, сообщи, что его нет в базе."
-    )
+    analyses_list = "\n".join([f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses])
+    return ("Ты — виртуальный помощник медицинской лаборатории. Дай пользователю краткую и точную информацию по анализам. "
+            "Вот данные наших анализов:\n" + analyses_list + "\n\nЕсли анализ не найден, сообщи, что его нет в базе.")
 
 def ask_openai(prompt, analyses):
     try:
         lab_context = get_lab_context(analyses)
         full_prompt = prompt + "\n\nЕсли в запросе упомянуты анализы, которых нет в нашей базе, сообщи, что информация по ним отсутствует."
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # При необходимости переключитесь на gpt-4-turbo
+            model="gpt-4o-mini",  # Или gpt-4-turbo, если требуется
             messages=[
                 {"role": "system", "content": lab_context},
                 {"role": "user", "content": full_prompt},
@@ -129,32 +122,26 @@ def ask_openai(prompt, analyses):
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
 
-##########################
-# Функции сравнения с конкурентами
-##########################
-
 def extract_matched_analyses(query, analyses):
     """
     Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
-    Перед сравнением каждое слово преобразуется по глоссарию синонимов.
-    Возвращает строку с найденными анализами, разделёнными запятыми.
+    Перед сравнением применяется глоссарий синонимов.
     """
     matched = set()
-    # Получаем список слов из текста (без знаков препинания)
+    # Сначала применяем синонимы ко всему тексту
+    query = apply_synonyms(query)
     query_tokens = re.findall(r'\w+', query)
-    # Применяем глоссарий: заменяем каждое слово на канонический вариант, если указано в SYNONYMS
-    canonical_tokens = [SYNONYMS.get(token, token) for token in query_tokens]
     for name, _, _ in analyses:
         name_tokens = re.findall(r'\w+', name)
         for n_token in name_tokens:
-            for token in canonical_tokens:
+            for token in query_tokens:
                 if token == n_token or get_close_matches(token, [n_token], n=1, cutoff=0.8):
                     matched.add(name)
                     break
             else:
                 continue
             break
-    logger.info(f"OCR текст: {query_tokens}, преобразованные токены: {canonical_tokens}, найденные анализы: {matched}")
+    logger.info(f"OCR текст: {query_tokens}, найденные анализы: {matched}")
     return ", ".join(matched)
 
 def find_best_match(query, competitor_data):
@@ -181,17 +168,11 @@ def compare_with_competitors(matched_names):
             results.append(f"Для анализа '{name}' информация по конкурентам не найдена.")
     return "\n".join(results)
 
-##########################
-# Логирование необработанных запросов и уведомление оператора
-##########################
-
 async def notify_admin_about_missing_request(query, user_id, context):
     pending_requests[user_id] = query
-    message = (
-        f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
-        f"Запрос: {query}\n\n"
-        f"Для ответа используйте команду: /reply {user_id} <Ваш ответ>"
-    )
+    message = (f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
+               f"Запрос: {query}\n\n"
+               f"Для ответа используйте команду: /reply {user_id} <Ваш ответ>")
     try:
         await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=message)
     except Exception as e:
@@ -204,20 +185,51 @@ async def process_response(response, user_message, user_id, context):
                 "Вы можете напрямую обратиться по телефону +77073145.")
     return response
 
-##########################
-# Функции интеграции с фотографиями
-##########################
+def detect_text_from_image(image_path):
+    try:
+        credentials_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if not credentials_json:
+            logger.error("Переменная GOOGLE_SERVICE_ACCOUNT_JSON не установлена.")
+            return ""
+        credentials_info = json.loads(credentials_json)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        client = vision.ImageAnnotatorClient(credentials=credentials)
+        with io.open(image_path, 'rb') as image_file:
+            content = image_file.read()
+        image = vision.Image(content=content)
+        response = client.text_detection(image=image)
+        if response.error.message:
+            logger.error(f"Google Vision API error: {response.error.message}")
+            return ""
+        texts = response.text_annotations
+        if texts:
+            return texts[0].description
+        return ""
+    except Exception as e:
+        logger.error(f"Ошибка при обработке изображения: {e}")
+        return ""
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обработчик фотографий:
-    1. Пересылает фото, отправленное пользователем, оператору для ручной обработки.
-    2. Уведомляет клиента, что запрос направлен оператору.
+    При получении фото, бот пересылает его оператору вместе с информацией о клиенте,
+    а клиент получает уведомление о том, что запрос направлен оператору.
     """
     try:
-        # Пересылаем сообщение (фото) оператору
+        # Получаем ID фото
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        # Формируем информацию о клиенте: если контакт отправлен, используем его, иначе username или ID
+        phone_info = "Номер не указан"
+        if update.message.contact and update.message.contact.phone_number:
+            phone_info = update.message.contact.phone_number
+        elif update.message.from_user.username:
+            phone_info = update.message.from_user.username
+        caption = f"Фото от клиента {update.message.chat.id}\nТелефон/Юзернейм: {phone_info}"
+        # Пересылаем фото оператору
         await update.message.forward(chat_id=ADMIN_TELEGRAM_ID)
-        # Отправляем клиенту уведомление
+        # Отправляем оператору дополнительное сообщение с информацией о клиенте
+        await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=caption)
+        # Уведомляем клиента
         await update.message.reply_text(
             "Ваш запрос получен и направлен оператору для ручной обработки. "
             "Вы можете напрямую обратиться по телефону +77073145."
@@ -226,15 +238,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка при пересылке фото: {e}")
         await update.message.reply_text("Произошла ошибка при обработке вашего запроса.")
 
-##########################
-# Обработчики команд и сообщений
-##########################
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает голосовое сообщение:
+    1. Скачивает аудиофайл голосового сообщения.
+    2. Отправляет его в OpenAI Whisper для расшифровки.
+    3. Отправляет расшифрованный текст клиенту и обрабатывает его как текстовый запрос.
+    """
+    try:
+        file = await update.message.voice.get_file()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp_file:
+            temp_file_path = tmp_file.name
+        await file.download_to_drive(custom_path=temp_file_path)
+        with open(temp_file_path, "rb") as audio_file:
+            transcript = openai.Audio.transcribe("whisper-1", audio_file)
+        os.remove(temp_file_path)
+        text = transcript.get("text", "")
+        await update.message.reply_text(f"Распознанный текст: {text}")
+        # Обрабатываем расшифрованный текст как обычный текстовый запрос
+        update.message.text = text
+        await handle_message(update, context)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке голосового сообщения: {e}")
+        await update.message.reply_text("Ошибка при обработке вашего голосового сообщения.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
 
 async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.message.chat_id) != ADMIN_TELEGRAM_ID:
+    if str(update.message.chat.id) != ADMIN_TELEGRAM_ID:
         return
     try:
         parts = update.message.text.split(" ", 2)
@@ -249,9 +281,9 @@ async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = normalize_text(update.message.text)
-    user_id = update.message.chat_id
+    user_id = update.message.chat.id
     logger.info(f"Запрос от {user_id}: {user_message}")
-
+    
     if "сравнить" in user_message:
         if user_id in pending_requests:
             saved_names = pending_requests[user_id]
@@ -281,18 +313,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(final_response)
 
-##########################
-# Основная функция
-##########################
-
-def main():
+if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reply", reply))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # Обработчик фотографий
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
