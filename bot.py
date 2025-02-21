@@ -4,7 +4,8 @@ import sqlite3
 import openai
 import re
 from difflib import get_close_matches
-from telegram import Update
+from fuzzywuzzy import fuzz, process
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -20,51 +21,45 @@ from google.oauth2 import service_account
 from google.cloud import vision
 
 # Константы и настройки
-DB_FILE = "lab_data(2).db"  # Файл базы данных с анализами и конкурентами
+DB_FILE = "lab_data(2).db"
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asasctime)s - %(name)s - %(levelname)s - %(message)s",
     level=os.getenv("LOG_LEVEL", "INFO"),
 )
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_PATH = DB_FILE
-ADMIN_TELEGRAM_ID = "5241327545"  # Ваш Telegram ID
+ADMIN_TELEGRAM_ID = "5241327545"
 
-# Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
-
-# Глобальный словарь для хранения извлечённых названий анализов из последнего запроса
 pending_requests = {}
 
-# Глоссарий синонимов: ключ – вариант, значение – каноническое название анализа (как записано в базе)
+# Расширенный словарь синонимов с учетом разных раскладок и опечаток
 SYNONYMS = {
-    "рф": "рф-суммарный",
-    "иммуноглобулин e": "ige",
-    "иммуноглобулин е": "ige",  # Кириллическая "е"
-    "иге": "ige",
-    "ig e": "ige",
-    "ige": "ige",
-    "immunoglobulin e": "ige",  # Латиница
-    "immunoglobulin е": "ige"   # Латиница + кириллица
+    r'\bрф\b': 'рф-суммарный',
+    r'\b(ige?|иге|ig[\s-]*e|иммуноглобулин[\s-]*[еe])\b': 'иммуноглобулин е',
+    r'\bревмофактор\b': 'рф-суммарный',
+    r'\bалт\b': 'аланинаминотрансфераза (алт)',
+    r'\bаст\b': 'аспартатаминотрансфераза (аст)'
 }
 
 def apply_synonyms(text):
-    """
-    Заменяет в тексте все вхождения синонимов на канонические названия.
-    """
-    for syn, canon in SYNONYMS.items():
-        text = re.sub(r'\b' + re.escape(syn) + r'\b', canon, text, flags=re.IGNORECASE)
+    """Нормализует текст с учетом сложных синонимов"""
+    text = text.lower().strip()
+    # Заменяем латинские e на кириллические е в ключевых словах
+    text = re.sub(r'(?i)immunoglobulin\s*e', 'иммуноглобулин е', text)
+    text = re.sub(r'(?i)(ige|ig\s*e)', 'иммуноглобулин е', text)
+    
+    for pattern, replacement in SYNONYMS.items():
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     return text
 
 def connect_to_db():
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
-        return conn
+        return sqlite3.connect(DB_FILE)
     except sqlite3.Error as e:
-        logger.error(f"Ошибка подключения к базе данных: {e}")
+        logger.error(f"Ошибка БД: {e}")
         return None
 
 def get_all_analyses():
@@ -74,82 +69,135 @@ def get_all_analyses():
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT name, price, timeframe FROM analyses")
-        results = cursor.fetchall()
-        conn.close()
-        # Приводим названия к нижнему регистру
-        return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
+        return [(normalize_text(name), price, timeframe) for name, price, timeframe in cursor.fetchall()]
     except sqlite3.Error as e:
-        logger.error(f"Ошибка при извлечении данных из БД: {e}")
+        logger.error(f"Ошибка данных: {e}")
         return []
+    finally:
+        conn.close()
 
 def normalize_text(text):
-    """
-    Приводит текст к нижнему регистру для обеспечения корректного сопоставления.
-    """
-    return text.lower()
+    """Улучшенная нормализация текста"""
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s-]', '', text)  # Удаляем спецсимволы
+    text = re.sub(r'\s+', ' ', text)      # Убираем лишние пробелы
+    return text
 
 def extract_matched_analyses(query, analyses):
-    """
-    Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
-    Перед сравнением применяется глоссарий синонимов.
-    Если в исходном тексте встречаются критические ключевые слова, добавляем канонический вариант.
-    Возвращает строку с найденными анализами, разделёнными запятыми.
-    """
-    matched = set()
-    # Применяем синонимы ко всему тексту
-    query_syn = apply_synonyms(query)
-    query_tokens = re.findall(r'\w+', query_syn)
-    for name, _, _ in analyses:
+    """Улучшенное извлечение анализов с нечетким поиском"""
+    query = apply_synonyms(query)
+    analysis_names = [name for name, _, _ in analyses]
+    
+    # Поиск точных совпадений
+    exact_matches = set()
+    for name in analysis_names:
+        if re.search(r'\b' + re.escape(name) + r'\b', query, re.IGNORECASE):
+            exact_matches.add(name)
+    
+    # Нечеткий поиск для частичных совпадений
+    token_matches = set()
+    query_tokens = re.findall(r'\w+', query)
+    for name in analysis_names:
         name_tokens = re.findall(r'\w+', name)
-        for n_token in name_tokens:
-            for token in query_tokens:
-                if token == n_token or get_close_matches(token, [n_token], n=1, cutoff=0.6):  # Понижен порог совпадения
-                    matched.add(name)
-                    break
-            else:
-                continue
-            break
-    # Дополнительная проверка для критических случаев
-    if any(word in query.lower() for word in ["рф", "rf"]) and "рф-суммарный" not in matched:
-        matched.add("рф-суммарный")
-    if any(word in query.lower() for word in ["иммуноглобулин", "immunoglobulin", "иге", "ige"]) and "ige" not in matched:
-        matched.add("ige")
-    logger.info(f"OCR текст: {query_tokens}, найденные анализы: {matched}")
-    return ", ".join(matched)
+        if any(fuzz.partial_ratio(token, name_token) > 85 
+               for token in query_tokens 
+               for name_token in name_tokens):
+            token_matches.add(name)
+    
+    # Комбинируем результаты
+    all_matches = exact_matches.union(token_matches)
+    
+    # Дополнительные проверки для критических случаев
+    if re.search(r'\bрф\b', query, re.IGNORECASE):
+        all_matches.add('рф-суммарный')
+    if re.search(r'\b(ige?|иге|иммуноглобулин)\b', query, re.IGNORECASE):
+        all_matches.add('иммуноглобулин е')
+    
+    logger.info(f"Найдены анализы: {all_matches}")
+    return ', '.join(all_matches) if all_matches else ''
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    При получении фото, бот пересылает его оператору вместе с информацией о клиенте,
-    а клиент получает уведомление о том, что запрос направлен оператору.
-    """
+    """Обработка фото с извлечением контактных данных"""
     try:
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        # Формируем информацию о клиенте: chat ID и username, если телефон недоступен
         user = update.message.from_user
-        client_info = f"Chat ID: {update.message.chat.id}"
-        if user.username:
-            client_info += f", Username: {user.username}"
-        # Если клиент отправил контакт, используем его номер
-        if update.message.contact and update.message.contact.phone_number:
-            client_info += f", Телефон: {update.message.contact.phone_number}"
+        contact_info = ""
+        
+        # Проверяем прикрепленный контакт
+        if update.message.contact:
+            phone = update.message.contact.phone_number
+            contact_info = f"Телефон: {phone}"
         else:
-            client_info += ", Телефон: Не указан"
-        caption = f"Фото от клиента:\n{client_info}"
-        await update.message.forward(chat_id=ADMIN_TELEGRAM_ID)
-        await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=caption)
-        await update.message.reply_text("Ваш запрос получен и направлен оператору для ручной обработки. "
-                                         "Вы можете напрямую обратиться по телефону +77073145.")
+            # Проверяем подпись к фото
+            caption = update.message.caption or ""
+            phone_match = re.search(r'(\+7|8)[\s-]?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}', caption)
+            if phone_match:
+                contact_info = f"Телефон из подписи: {phone_match.group()}"
+        
+        # Формируем информацию о клиенте
+        client_info = [
+            f"ID: {user.id}",
+            f"Username: @{user.username}" if user.username else "",
+            f"Имя: {user.first_name} {user.last_name or ''}".strip(),
+            contact_info
+        ]
+        client_info = "\n".join(filter(None, client_info))
+        
+        # Пересылаем фото и информацию
+        await update.message.forward(ADMIN_TELEGRAM_ID)
+        await context.bot.send_message(
+            chat_id=ADMIN_TELEGRAM_ID,
+            text=f"📷 Фото от клиента:\n{client_info}\n\n"
+                 f"Для ответа используйте /reply {user.id} <текст>"
+        )
+        
+        # Ответ пользователю
+        response = ("✅ Ваше направление получено. "
+                    "Оператор свяжется с вами в ближайшее время. "
+                    "Вы также можете поделиться контактом для быстрой связи:")
+        
+        reply_keyboard = [[{"text": "📱 Отправить контакт", "request_contact": True}]]
+        await update.message.reply_text(
+            response,
+            reply_markup=ReplyKeyboardMarkup(
+                reply_keyboard, 
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+        )
+        
     except Exception as e:
-        logger.error(f"Ошибка при пересылке фото: {e}")
-        await update.message.reply_text("Произошла ошибка при обработке вашего запроса.")
+        logger.error(f"Ошибка фото: {e}")
+        await update.message.reply_text("⚠️ Ошибка обработки фото. Пожалуйста, попробуйте позже.")
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка полученного контакта"""
+    try:
+        phone = update.message.contact.phone_number
+        user = update.message.from_user
+        await context.bot.send_message(
+            ADMIN_TELEGRAM_ID,
+            f"📱 Новый контакт от {user.first_name}:\n"
+            f"Телефон: {phone}\n"
+            f"User ID: {user.id}"
+        )
+        await update.message.reply_text(
+            "✅ Спасибо! Ваш контакт сохранён. "
+            "Оператор свяжется с вами в ближайшее время.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка контакта: {e}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start)) 
+    
+    # Обработчики
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reply", reply))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Бот запущен.")
+    
+    logger.info("Бот запущен")
     app.run_polling()
