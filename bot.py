@@ -28,7 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_PATH = DB_FILE
@@ -123,32 +122,25 @@ def ask_openai(prompt, analyses):
 
 def extract_matched_analyses(query, analyses):
     """
-    Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
-    Перед сравнением каждое слово преобразуется по глоссарию синонимов.
-    Если в исходном запросе явно встречаются критические слова, добавляет канонический вариант.
+    Извлекает названия анализов, сравнивая весь запрос с названием каждого анализа
+    с использованием нечеткого сравнения (fuzz.token_set_ratio).
+    Если схожесть выше 70, анализ считается найденным.
+    Дополнительно, если в исходном запросе явно встречаются критические слова,
+    добавляет канонический вариант.
     Возвращает строку с найденными анализами, разделёнными запятыми.
     """
-    matched = set()
     query_syn = apply_synonyms(query)
-    query_tokens = re.findall(r'\w+', query_syn)
+    matched = set()
     for name, _, _ in analyses:
-        if re.search(r'\b' + re.escape(name) + r'\b', query_syn, re.IGNORECASE):
+        score = fuzz.token_set_ratio(query_syn, name)
+        if score > 70:
             matched.add(name)
-        else:
-            name_tokens = re.findall(r'\w+', name)
-            for token in query_tokens:
-                for n_token in name_tokens:
-                    if fuzz.partial_ratio(token, n_token) > 80:
-                        matched.add(name)
-                        break
-                else:
-                    continue
-                break
+    # Дополнительная проверка для критических случаев
     if any(token in query_syn for token in ["рф", "рфсуммарный"]) and "рф-суммарный" not in matched:
         matched.add("рф-суммарный")
     if any(token in query_syn for token in ["иге", "иммуноглобулин"]) and "ige" not in matched:
         matched.add("ige")
-    logger.info(f"Найдены анализы: {matched} для запроса (токены): {query_tokens}")
+    logger.info(f"Сравнение запроса '{query_syn}' с анализами дало: {matched}")
     return ", ".join(matched) if matched else ""
 
 def find_best_match(query, competitor_data):
@@ -266,6 +258,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}")
         await update.message.reply_text("Ошибка при обработке вашего голосового сообщения.")
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка полученного контакта."""
+    try:
+        phone = update.message.contact.phone_number
+        user = update.message.from_user
+        await context.bot.send_message(
+            ADMIN_TELEGRAM_ID,
+            f"📱 Новый контакт от {user.first_name} {user.last_name or ''} (ID: {user.id}):\nТелефон: {phone}"
+        )
+        await update.message.reply_text(
+            "✅ Спасибо! Ваш контакт сохранён. Оператор свяжется с вами в ближайшее время.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке контакта: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
