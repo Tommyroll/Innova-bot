@@ -21,43 +21,45 @@ from google.oauth2 import service_account
 from google.cloud import vision
 
 # Константы и настройки
-DB_FILE = "lab_data(2).db"
+DB_FILE = "lab_data(2).db"  # Файл базы данных с анализами и конкурентами
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=os.getenv("LOG_LEVEL", "INFO"),
 )
 logger = logging.getLogger(__name__)
 
+# Переменные окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_TELEGRAM_ID = "5241327545"
+DATABASE_PATH = DB_FILE
+ADMIN_TELEGRAM_ID = "5241327545"  # Ваш Telegram ID
 
+# Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 pending_requests = {}
 
-# Расширенный словарь синонимов с учетом разных раскладок и опечаток
+# Глоссарий синонимов: ключ – вариант, значение – каноническое название анализа (как записано в базе)
 SYNONYMS = {
-    r'\bрф\b': 'рф-суммарный',
-    r'\b(ige?|иге|ig[\s-]*e|иммуноглобулин[\s-]*[еe])\b': 'иммуноглобулин е',
-    r'\bревмофактор\b': 'рф-суммарный',
-    r'\bалт\b': 'аланинаминотрансфераза (алт)',
-    r'\bаст\b': 'аспартатаминотрансфераза (аст)'
+    "рф": "рф-суммарный",
+    "иммуноглобулин e": "ige",
+    "иге": "ige",
+    "ig e": "ige"
 }
 
 def apply_synonyms(text):
-    """Нормализует текст с учетом сложных синонимов."""
+    """
+    Заменяет в тексте все вхождения синонимов на канонические названия.
+    """
     text = text.lower().strip()
-    text = re.sub(r'(?i)immunoglobulin\s*e', 'иммуноглобулин е', text)
-    text = re.sub(r'(?i)(ige|ig\s*e)', 'иммуноглобулин е', text)
-    for pattern, replacement in SYNONYMS.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    for syn, canon in SYNONYMS.items():
+        text = re.sub(r'\b' + re.escape(syn) + r'\b', canon, text, flags=re.IGNORECASE)
     return text
 
 def connect_to_db():
     try:
-        return sqlite3.connect(DB_FILE)
+        return sqlite3.connect(DATABASE_PATH)
     except sqlite3.Error as e:
-        logger.error(f"Ошибка БД: {e}")
+        logger.error(f"Ошибка подключения к базе данных: {e}")
         return None
 
 def get_all_analyses():
@@ -67,10 +69,10 @@ def get_all_analyses():
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT name, price, timeframe FROM analyses")
-        data = cursor.fetchall()
-        return [(normalize_text(name), price, timeframe) for name, price, timeframe in data]
+        results = cursor.fetchall()
+        return [(normalize_text(name), price, timeframe) for name, price, timeframe in results]
     except sqlite3.Error as e:
-        logger.error(f"Ошибка данных: {e}")
+        logger.error(f"Ошибка при извлечении данных из БД: {e}")
         return []
     finally:
         conn.close()
@@ -82,8 +84,8 @@ def get_competitor_data():
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT name, lab, price, timeframe FROM competitor_prices")
-        data = cursor.fetchall()
-        return [(normalize_text(name), lab, price, timeframe) for name, lab, price, timeframe in data]
+        results = cursor.fetchall()
+        return [(normalize_text(name), lab, price, timeframe) for name, lab, price, timeframe in results]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при загрузке данных конкурентов: {e}")
         return []
@@ -91,45 +93,68 @@ def get_competitor_data():
         conn.close()
 
 def normalize_text(text):
-    """Улучшенная нормализация текста: приводим к нижнему регистру, убираем спецсимволы и лишние пробелы."""
-    text = text.lower().strip()
-    text = re.sub(r'[^\w\s-]', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text
+    """
+    Приводит текст к нижнему регистру для обеспечения корректного сопоставления.
+    """
+    return text.lower()
+
+def get_lab_context(analyses):
+    analyses_list = "\n".join([f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses])
+    return ("Ты — виртуальный помощник медицинской лаборатории. Дай пользователю краткую и точную информацию по анализам. " +
+            "Вот данные наших анализов:\n" + analyses_list + "\n\nЕсли анализ не найден, сообщи, что его нет в базе.")
+
+def ask_openai(prompt, analyses):
+    try:
+        lab_context = get_lab_context(analyses)
+        full_prompt = prompt + "\n\nЕсли в запросе упомянуты анализы, которых нет в нашей базе, сообщи, что информация по ним отсутствует."
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",  # Или gpt-4-turbo
+            messages=[
+                {"role": "system", "content": lab_context},
+                {"role": "user", "content": full_prompt},
+            ],
+            max_tokens=400,
+            temperature=0.5,
+        )
+        return response["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Ошибка OpenAI: {e}")
+        return "Извините, я не смог обработать ваш запрос."
 
 def extract_matched_analyses(query, analyses):
     """
     Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
-    Перед сравнением каждое слово преобразуется по глоссарию синонимов.
+    Применяет синонимы и использует нечеткий поиск (fuzzywuzzy).
+    Если в исходном запросе явно встречаются критические слова, добавляет канонический вариант.
     Возвращает строку с найденными анализами, разделёнными запятыми.
     """
     matched = set()
-    query = apply_synonyms(query)
-    query_tokens = re.findall(r'\w+', query)
+    query_syn = apply_synonyms(query)
+    query_tokens = re.findall(r'\w+', query_syn)
     analysis_names = [name for name, _, _ in analyses]
     
     # Точное совпадение
     for name in analysis_names:
-        if re.search(r'\b' + re.escape(name) + r'\b', query, re.IGNORECASE):
+        if re.search(r'\b' + re.escape(name) + r'\b', query_syn, re.IGNORECASE):
             matched.add(name)
     
-    # Нечеткий поиск
+    # Нечеткий поиск: порог снижен до 80
     for name in analysis_names:
         name_tokens = re.findall(r'\w+', name)
         for token in query_tokens:
             for n_token in name_tokens:
-                if fuzz.partial_ratio(token, n_token) > 85:
+                if fuzz.partial_ratio(token, n_token) > 80:
                     matched.add(name)
                     break
             else:
                 continue
             break
 
-    # Дополнительная проверка для критических случаев
-    if re.search(r'\bрф\b', query, re.IGNORECASE) and not any("рф-суммарный" in m for m in matched):
+    # Дополнительная проверка для критических случаев через query_syn
+    if any(token in query_syn for token in ["рф", "рфсуммарный"]) and "рф-суммарный" not in matched:
         matched.add("рф-суммарный")
-    if re.search(r'\b(иге|иммуноглобулин)\b', query, re.IGNORECASE) and not any("иммуноглобулин е" in m for m in matched):
-        matched.add("иммуноглобулин е")
+    if any(token in query_syn for token in ["иге", "иммуноглобулин"]) and "ige" not in matched:
+        matched.add("ige")
     
     logger.info(f"Найдены анализы: {matched} для запроса (токены): {query_tokens}")
     return ', '.join(matched) if matched else ''
@@ -251,22 +276,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка при обработке голосового сообщения: {e}")
         await update.message.reply_text("Ошибка при обработке вашего голосового сообщения.")
 
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка полученного контакта"""
-    try:
-        phone = update.message.contact.phone_number
-        user = update.message.from_user
-        await context.bot.send_message(
-            ADMIN_TELEGRAM_ID,
-            f"📱 Новый контакт от {user.first_name} {user.last_name or ''} (ID: {user.id}):\nТелефон: {phone}"
-        )
-        await update.message.reply_text(
-            "✅ Спасибо! Ваш контакт сохранён. Оператор свяжется с вами в ближайшее время.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при обработке контакта: {e}")
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
 
@@ -324,7 +333,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("reply", reply))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
