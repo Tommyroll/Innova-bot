@@ -216,7 +216,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.contact and update.message.contact.phone_number:
             client_info += f"Телефон: {update.message.contact.phone_number}\n"
         else:
-            caption = update.message.caption or \"\"
+            caption = update.message.caption or ""
             phone_match = re.search(r'(\\+7|8)[\\s-]?\\(?\\d{3}\\)?[\\s-]?\\d{3}[\\s-]?\\d{2}[\\s-]?\\d{2}', caption)
             if phone_match:
                 client_info += f"Телефон из подписи: {phone_match.group()}\n"
