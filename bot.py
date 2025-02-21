@@ -5,7 +5,7 @@ import openai
 import re
 from difflib import get_close_matches
 from fuzzywuzzy import fuzz, process
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -23,7 +23,7 @@ from google.cloud import vision
 # Константы и настройки
 DB_FILE = "lab_data(2).db"
 logging.basicConfig(
-    format="%(asasctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=os.getenv("LOG_LEVEL", "INFO"),
 )
 logger = logging.getLogger(__name__)
@@ -45,12 +45,11 @@ SYNONYMS = {
 }
 
 def apply_synonyms(text):
-    """Нормализует текст с учетом сложных синонимов"""
+    """Нормализует текст с учетом сложных синонимов."""
     text = text.lower().strip()
-    # Заменяем латинские e на кириллические е в ключевых словах
+    # Пример замены латинского на кириллическое написание в ключевых фразах
     text = re.sub(r'(?i)immunoglobulin\s*e', 'иммуноглобулин е', text)
     text = re.sub(r'(?i)(ige|ig\s*e)', 'иммуноглобулин е', text)
-    
     for pattern, replacement in SYNONYMS.items():
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     return text
@@ -69,135 +68,100 @@ def get_all_analyses():
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT name, price, timeframe FROM analyses")
-        return [(normalize_text(name), price, timeframe) for name, price, timeframe in cursor.fetchall()]
+        data = cursor.fetchall()
+        return [(normalize_text(name), price, timeframe) for name, price, timeframe in data]
     except sqlite3.Error as e:
         logger.error(f"Ошибка данных: {e}")
         return []
     finally:
         conn.close()
 
+def get_competitor_data():
+    conn = connect_to_db()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, lab, price, timeframe FROM competitor_prices")
+        data = cursor.fetchall()
+        return [(normalize_text(name), lab, price, timeframe) for name, lab, price, timeframe in data]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при загрузке данных конкурентов: {e}")
+        return []
+    finally:
+        conn.close()
+
 def normalize_text(text):
-    """Улучшенная нормализация текста"""
+    """Улучшенная нормализация текста: приводим к нижнему регистру, убираем спецсимволы и лишние пробелы."""
     text = text.lower().strip()
-    text = re.sub(r'[^\w\s-]', '', text)  # Удаляем спецсимволы
-    text = re.sub(r'\s+', ' ', text)      # Убираем лишние пробелы
+    text = re.sub(r'[^\w\s-]', '', text)
+    text = re.sub(r'\s+', ' ', text)
     return text
 
 def extract_matched_analyses(query, analyses):
-    """Улучшенное извлечение анализов с нечетким поиском"""
+    """
+    Извлекает названия анализов, сравнивая слова из запроса с названиями анализов.
+    Применяет синонимы и использует fuzzywuzzy для нечеткого поиска.
+    """
+    matched = set()
     query = apply_synonyms(query)
+    query_tokens = re.findall(r'\w+', query)
     analysis_names = [name for name, _, _ in analyses]
     
-    # Поиск точных совпадений
-    exact_matches = set()
+    # Точное совпадение по регулярке
     for name in analysis_names:
         if re.search(r'\b' + re.escape(name) + r'\b', query, re.IGNORECASE):
-            exact_matches.add(name)
+            matched.add(name)
     
-    # Нечеткий поиск для частичных совпадений
-    token_matches = set()
-    query_tokens = re.findall(r'\w+', query)
+    # Нечеткий поиск: для каждого слова из запроса смотрим, насколько оно похоже на слово из названия
     for name in analysis_names:
         name_tokens = re.findall(r'\w+', name)
-        if any(fuzz.partial_ratio(token, name_token) > 85 
-               for token in query_tokens 
-               for name_token in name_tokens):
-            token_matches.add(name)
-    
-    # Комбинируем результаты
-    all_matches = exact_matches.union(token_matches)
-    
-    # Дополнительные проверки для критических случаев
-    if re.search(r'\bрф\b', query, re.IGNORECASE):
-        all_matches.add('рф-суммарный')
-    if re.search(r'\b(ige?|иге|иммуноглобулин)\b', query, re.IGNORECASE):
-        all_matches.add('иммуноглобулин е')
-    
-    logger.info(f"Найдены анализы: {all_matches}")
-    return ', '.join(all_matches) if all_matches else ''
+        for token in query_tokens:
+            for n_token in name_tokens:
+                if fuzz.partial_ratio(token, n_token) > 85:
+                    matched.add(name)
+                    break
+            else:
+                continue
+            break
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка фото с извлечением контактных данных"""
-    try:
-        user = update.message.from_user
-        contact_info = ""
-        
-        # Проверяем прикрепленный контакт
-        if update.message.contact:
-            phone = update.message.contact.phone_number
-            contact_info = f"Телефон: {phone}"
+    # Дополнительная проверка для критических случаев
+    if re.search(r'\bрф\b', query, re.IGNORECASE) and not any("рф-суммарный" in m for m in matched):
+        matched.add("рф-суммарный")
+    if re.search(r'\b(иге|иммуноглобулин)\b', query, re.IGNORECASE) and not any("иммуноглобулин е" in m for m in matched):
+        matched.add("иммуноглобулин е")
+    
+    logger.info(f"Найдены анализы: {matched} для запроса (токены): {query_tokens}")
+    return ', '.join(matched) if matched else ''
+
+def find_best_match(query, competitor_data):
+    competitor_names = [name for name, _, _, _ in competitor_data]
+    matches = get_close_matches(query, competitor_names, n=1, cutoff=0.5)
+    if matches:
+        for name, lab, price, timeframe in competitor_data:
+            if name == matches[0]:
+                return (name, lab, price, timeframe)
+    return None
+
+def compare_with_competitors(matched_names):
+    competitor_data = get_competitor_data()
+    if not matched_names:
+        return "Не удалось извлечь названия анализов для сравнения."
+    names = [name.strip() for name in matched_names.split(',')]
+    results = []
+    for name in names:
+        best = find_best_match(name, competitor_data)
+        if best:
+            comp_name, lab, comp_price, comp_timeframe = best
+            results.append(f"Конкурент ({lab}): {comp_name} — {comp_price} KZT, Срок: {comp_timeframe}")
         else:
-            # Проверяем подпись к фото
-            caption = update.message.caption or ""
-            phone_match = re.search(r'(\+7|8)[\s-]?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}', caption)
-            if phone_match:
-                contact_info = f"Телефон из подписи: {phone_match.group()}"
-        
-        # Формируем информацию о клиенте
-        client_info = [
-            f"ID: {user.id}",
-            f"Username: @{user.username}" if user.username else "",
-            f"Имя: {user.first_name} {user.last_name or ''}".strip(),
-            contact_info
-        ]
-        client_info = "\n".join(filter(None, client_info))
-        
-        # Пересылаем фото и информацию
-        await update.message.forward(ADMIN_TELEGRAM_ID)
-        await context.bot.send_message(
-            chat_id=ADMIN_TELEGRAM_ID,
-            text=f"📷 Фото от клиента:\n{client_info}\n\n"
-                 f"Для ответа используйте /reply {user.id} <текст>"
-        )
-        
-        # Ответ пользователю
-        response = ("✅ Ваше направление получено. "
-                    "Оператор свяжется с вами в ближайшее время. "
-                    "Вы также можете поделиться контактом для быстрой связи:")
-        
-        reply_keyboard = [[{"text": "📱 Отправить контакт", "request_contact": True}]]
-        await update.message.reply_text(
-            response,
-            reply_markup=ReplyKeyboardMarkup(
-                reply_keyboard, 
-                resize_keyboard=True,
-                one_time_keyboard=True
-            )
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка фото: {e}")
-        await update.message.reply_text("⚠️ Ошибка обработки фото. Пожалуйста, попробуйте позже.")
+            results.append(f"Для анализа '{name}' информация по конкурентам не найдена.")
+    return "\n".join(results)
 
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка полученного контакта"""
+async def notify_admin_about_missing_request(query, user_id, context):
+    pending_requests[user_id] = query
+    message = (f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
+               f"Запрос: {query}\n\n"
+               f"Для ответа используйте команду: /reply {user_id} <Ваш ответ>")
     try:
-        phone = update.message.contact.phone_number
-        user = update.message.from_user
-        await context.bot.send_message(
-            ADMIN_TELEGRAM_ID,
-            f"📱 Новый контакт от {user.first_name}:\n"
-            f"Телефон: {phone}\n"
-            f"User ID: {user.id}"
-        )
-        await update.message.reply_text(
-            "✅ Спасибо! Ваш контакт сохранён. "
-            "Оператор свяжется с вами в ближайшее время.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-    except Exception as e:
-        logger.error(f"Ошибка контакта: {e}")
-
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("reply", reply))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("Бот запущен")
-    app.run_polling()
+        await context.bot.send_message(cha
