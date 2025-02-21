@@ -47,7 +47,6 @@ SYNONYMS = {
 def apply_synonyms(text):
     """Нормализует текст с учетом сложных синонимов."""
     text = text.lower().strip()
-    # Пример замены латинского на кириллическое написание в ключевых фразах
     text = re.sub(r'(?i)immunoglobulin\s*e', 'иммуноглобулин е', text)
     text = re.sub(r'(?i)(ige|ig\s*e)', 'иммуноглобулин е', text)
     for pattern, replacement in SYNONYMS.items():
@@ -100,20 +99,21 @@ def normalize_text(text):
 
 def extract_matched_analyses(query, analyses):
     """
-    Извлекает названия анализов, сравнивая слова из запроса с названиями анализов.
-    Применяет синонимы и использует fuzzywuzzy для нечеткого поиска.
+    Извлекает названия анализов, сравнивая отдельные слова из текста с названиями анализов.
+    Перед сравнением каждое слово преобразуется по глоссарию синонимов.
+    Возвращает строку с найденными анализами, разделёнными запятыми.
     """
     matched = set()
     query = apply_synonyms(query)
     query_tokens = re.findall(r'\w+', query)
     analysis_names = [name for name, _, _ in analyses]
     
-    # Точное совпадение по регулярке
+    # Точное совпадение
     for name in analysis_names:
         if re.search(r'\b' + re.escape(name) + r'\b', query, re.IGNORECASE):
             matched.add(name)
     
-    # Нечеткий поиск: для каждого слова из запроса смотрим, насколько оно похоже на слово из названия
+    # Нечеткий поиск
     for name in analysis_names:
         name_tokens = re.findall(r'\w+', name)
         for token in query_tokens:
@@ -208,7 +208,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         file = await photo.get_file()
         user = update.message.from_user
-        # Формируем информацию о клиенте: ID, username, контакт (если есть) из сообщения или подписи
         client_info = f"ID: {update.message.chat.id}\n"
         if user.username:
             client_info += f"Username: @{user.username}\n"
@@ -217,7 +216,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             client_info += f"Телефон: {update.message.contact.phone_number}\n"
         else:
             caption = update.message.caption or ""
-            phone_match = re.search(r'(\\+7|8)[\\s-]?\\(?\\d{3}\\)?[\\s-]?\\d{3}[\\s-]?\\d{2}[\\s-]?\\d{2}', caption)
+            phone_match = re.search(r'(\+7|8)[\s-]?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}', caption)
             if phone_match:
                 client_info += f"Телефон из подписи: {phone_match.group()}\n"
         
@@ -246,12 +245,27 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(temp_file_path)
         text = transcript.get("text", "")
         await update.message.reply_text(f"Распознанный текст: {text}")
-        # Обрабатываем текст как обычный запрос
         update.message.text = text
         await handle_message(update, context)
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}")
         await update.message.reply_text("Ошибка при обработке вашего голосового сообщения.")
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка полученного контакта"""
+    try:
+        phone = update.message.contact.phone_number
+        user = update.message.from_user
+        await context.bot.send_message(
+            ADMIN_TELEGRAM_ID,
+            f"📱 Новый контакт от {user.first_name} {user.last_name or ''} (ID: {user.id}):\nТелефон: {phone}"
+        )
+        await update.message.reply_text(
+            "✅ Спасибо! Ваш контакт сохранён. Оператор свяжется с вами в ближайшее время.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке контакта: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
@@ -310,7 +324,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("reply", reply))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))  # Если функция handle_contact нужна, можно её добавить
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
