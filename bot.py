@@ -2,7 +2,9 @@ import logging
 import os
 import sqlite3
 import openai
+import re
 from difflib import get_close_matches
+from fuzzywuzzy import fuzz, process
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
@@ -33,25 +35,31 @@ ADMIN_TELEGRAM_ID = "5241327545"  # Ваш Telegram ID
 
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
-
-# Глобальный словарь для хранения извлечённых названий анализов из последнего запроса
 pending_requests = {}
 
-##########################
-# Функции работы с базой данных
-##########################
+# Глоссарий синонимов: ключ – вариант, значение – каноническое название анализа
+SYNONYMS = {
+    "рф": "рф-суммарный",
+    "иммуноглобулин e": "ige",
+    "иге": "ige",
+    "ig e": "ige"
+}
+
+def apply_synonyms(text):
+    """Заменяет в тексте все вхождения синонимов на канонические названия."""
+    text = text.lower().strip()
+    for syn, canon in SYNONYMS.items():
+        text = re.sub(r'\b' + re.escape(syn) + r'\b', canon, text, flags=re.IGNORECASE)
+    return text
 
 def connect_to_db():
-    """Подключается к базе данных SQLite."""
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
-        return conn
+        return sqlite3.connect(DATABASE_PATH)
     except sqlite3.Error as e:
         logger.error(f"Ошибка подключения к базе данных: {e}")
         return None
 
 def get_all_analyses():
-    """Получает все анализы из таблицы analyses."""
     conn = connect_to_db()
     if not conn:
         return []
@@ -67,7 +75,6 @@ def get_all_analyses():
         conn.close()
 
 def get_competitor_data():
-    """Получает данные из таблицы competitor_prices."""
     conn = connect_to_db()
     if not conn:
         return []
@@ -82,48 +89,27 @@ def get_competitor_data():
     finally:
         conn.close()
 
-##########################
-# Функции нормализации текста
-##########################
-
 def normalize_text(text):
-    """
-    Приводит текст к нижнему регистру и заменяет кириллическую "б" на латинскую "b".
-    Это помогает сопоставлять, например, "витамин б" и "витамин B".
-    """
-    text = text.replace("б", "b")
-    return text.lower()
-
-##########################
-# Функции для OpenAI
-##########################
+    """Приводит текст к нижнему регистру, удаляет спецсимволы и лишние пробелы."""
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s-]', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text
 
 def get_lab_context(analyses):
-    """
-    Формирует системный контекст для OpenAI с перечнем наших анализов.
-    """
-    analyses_list = "\n".join(
-        [f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses]
-    )
-    return (
-        "Ты — виртуальный помощник медицинской лаборатории. "
-        "Дай пользователю краткую и точную информацию по анализам. "
-        "Вот данные наших анализов:\n"
-        f"{analyses_list}\n\n"
-        "Если анализ не найден, сообщи, что его нет в базе."
-    )
+    analyses_list = "\n".join([f"{name}: Цена — {price} KZT. Срок — {timeframe}" for name, price, timeframe in analyses])
+    return ("Ты — виртуальный помощник медицинской лаборатории. Дай пользователю краткую и точную информацию по анализам. " +
+            "Вот данные наших анализов:\n" + analyses_list + "\n\nЕсли анализ не найден, сообщи, что его нет в базе.")
 
 def ask_openai(prompt, analyses):
-    """
-    Отправляет запрос в OpenAI с контекстом лаборатории и возвращает сгенерированный ответ.
-    """
     try:
         lab_context = get_lab_context(analyses)
+        full_prompt = prompt + "\n\nЕсли в запросе упомянуты анализы, которых нет в нашей базе, сообщи, что информация по ним отсутствует."
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # При необходимости переключитесь на gpt-4-turbo
+            model="gpt-4o-mini",  # Или gpt-4-turbo
             messages=[
                 {"role": "system", "content": lab_context},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": full_prompt}
             ],
             max_tokens=400,
             temperature=0.5,
@@ -133,105 +119,90 @@ def ask_openai(prompt, analyses):
         logger.error(f"Ошибка OpenAI: {e}")
         return "Извините, я не смог обработать ваш запрос."
 
-##########################
-# Функция поиска анализов (старая версия)
-##########################
-
 def extract_matched_analyses(query, analyses):
     """
-    Извлекает из запроса названия анализов, сравнивая каждую часть с данными из нашей базы.
-    Запрос разбивается по запятым или " и ". Возвращает строку с найденными названиями, разделёнными запятыми.
+    Извлекает названия анализов, сравнивая весь запрос с каждым названием анализа с использованием нечеткого сравнения.
+    Если схожесть выше 70, анализ считается найденным. Дополнительно, если в запросе явно встречаются критические слова,
+    добавляет канонический вариант.
     """
-    if "," in query:
-        parts = [part.strip() for part in query.split(",")]
-    elif " и " in query:
-        parts = [part.strip() for part in query.split(" и ")]
-    else:
-        parts = [query.strip()]
-    matched = []
-    for part in parts:
-        for name, _, _ in analyses:
-            if part in name or get_close_matches(part, [name], n=1, cutoff=0.5):
-                matched.append(name)
-    return ", ".join(list(set(matched)))
+    query_syn = apply_synonyms(query)
+    matched = set()
+    for name, _, _ in analyses:
+        score = fuzz.token_set_ratio(query_syn, name)
+        if score > 70:
+            matched.add(name)
+    # Дополнительная проверка для критических случаев
+    if any(token in query_syn for token in ["рф", "рфсуммарный"]) and "рф-суммарный" not in matched:
+        matched.add("рф-суммарный")
+    if any(token in query_syn for token in ["иге", "иммуноглобулин"]) and "ige" not in matched:
+        matched.add("ige")
+    logger.info(f"Сравнение запроса '{query_syn}' с анализами дало: {matched}")
+    return ", ".join(matched) if matched else ""
 
-##########################
-# Обработчики команд и сообщений
-##########################
+def find_best_match(query, competitor_data):
+    competitor_names = [name for name, _, _, _ in competitor_data]
+    matches = get_close_matches(query, competitor_names, n=1, cutoff=0.5)
+    if matches:
+        for name, lab, price, timeframe in competitor_data:
+            if name == matches[0]:
+                return (name, lab, price, timeframe)
+    return None
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
-
-async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.message.chat.id) != ADMIN_TELEGRAM_ID:
-        return
-    try:
-        parts = update.message.text.split(" ", 2)
-        target_user = int(parts[1])
-        operator_reply = parts[2]
-        await context.bot.send_message(chat_id=target_user, text=operator_reply)
-        await update.message.reply_text("Ответ отправлен клиенту.")
-        pending_requests.pop(target_user, None)
-    except (IndexError, ValueError) as e:
-        logger.error(f"Ошибка в команде /reply: {e}")
-        await update.message.reply_text("Неправильный формат команды. Используйте: /reply <user_id> <ответ>")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = normalize_text(update.message.text)
-    user_id = update.message.chat.id
-    logger.info(f"Запрос от {user_id}: {user_message}")
-
-    if "сравнить" in user_message:
-        if user_id in pending_requests:
-            saved_names = pending_requests[user_id]
-            comp_response = compare_with_competitors(saved_names)
-            if "не найдена" in comp_response.lower():
-                await notify_admin_about_missing_request(saved_names, user_id, context)
-                comp_response += "\n\nИзвините, информация по конкурентам отсутствует. Запрос передан оператору."
-            await update.message.reply_text(comp_response)
-            return
-        else:
-            await update.message.reply_text("Нет предыдущего запроса для сравнения.")
-            return
-
-    analyses = get_all_analyses()
-    extracted_names = extract_matched_analyses(user_message, analyses)
-    if extracted_names:
-        pending_requests[user_id] = extracted_names
-    else:
-        pending_requests[user_id] = user_message
-
-    response = ask_openai(user_message, analyses)
-    final_response = await process_response(response, user_message, user_id, context)
-
+def compare_with_competitors(matched_names):
     competitor_data = get_competitor_data()
-    if competitor_data:
-        final_response += "\n\nЕсли хотите сравнить цены с конкурентами, отправьте 'сравнить'."
+    if not matched_names:
+        return "Не удалось извлечь названия анализов для сравнения."
+    names = [name.strip() for name in matched_names.split(',')]
+    results = []
+    for name in names:
+        best = find_best_match(name, competitor_data)
+        if best:
+            comp_name, lab, comp_price, comp_timeframe = best
+            results.append(f"Конкурент ({lab}): {comp_name} — {comp_price} KZT, Срок: {comp_timeframe}")
+        else:
+            results.append(f"Для анализа '{name}' информация по конкурентам не найдена.")
+    return "\n".join(results)
 
-    await update.message.reply_text(final_response)
-
-async def notify_admin_about_missing_request(query, user_id, context: ContextTypes.DEFAULT_TYPE):
+async def notify_admin_about_missing_request(query, user_id, context):
     pending_requests[user_id] = query
-    message = (
-        f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
-        f"Запрос: {query}\n\n"
-        f"Для ответа используйте команду: /reply {user_id} <Ваш ответ>"
-    )
+    message = (f"⚠️ Пропущенный запрос от пользователя {user_id}:\n\n"
+               f"Запрос: {query}\n\n"
+               f"Для ответа используйте команду: /reply {user_id} <Ваш ответ>")
     try:
         await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=message)
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления: {e}")
 
-async def process_response(response, user_message, user_id, context: ContextTypes.DEFAULT_TYPE):
+async def process_response(response, user_message, user_id, context):
     if any(phrase in response.lower() for phrase in ["отсутствует", "нет в базе", "не найден"]):
         await notify_admin_about_missing_request(user_message, user_id, context)
         return ("Извините, этот анализ отсутствует в нашей базе. Мы передали запрос оператору для уточнения. "
                 "Вы можете напрямую обратиться по телефону +77073145.")
     return response
 
-##########################
-# Дополнительные обработчики (фото, голос, контакт)
-##########################
+def detect_text_from_image(image_path):
+    try:
+        credentials_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if not credentials_json:
+            logger.error("Переменная GOOGLE_SERVICE_ACCOUNT_JSON не установлена.")
+            return ""
+        credentials_info = json.loads(credentials_json)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        client = vision.ImageAnnotatorClient(credentials=credentials)
+        with io.open(image_path, 'rb') as image_file:
+            content = image_file.read()
+        image = vision.Image(content=content)
+        response = client.text_detection(image=image)
+        if response.error.message:
+            logger.error(f"Google Vision API error: {response.error.message}")
+            return ""
+        texts = response.text_annotations
+        if texts:
+            return texts[0].description
+        return ""
+    except Exception as e:
+        logger.error(f"Ошибка при обработке изображения: {e}")
+        return ""
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -278,14 +249,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(temp_file_path)
         text = transcript.get("text", "")
         await update.message.reply_text(f"Распознанный текст: {text}")
-        update.message.text = text
-        await handle_message(update, context)
+        # Вызываем функцию обработки запроса с расшифрованным текстом
+        await process_query(text, update, context)
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}")
         await update.message.reply_text("Ошибка при обработке вашего голосового сообщения.")
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает полученный контакт."""
+    """Обработка полученного контакта."""
     try:
         phone = update.message.contact.phone_number
         user = update.message.from_user
@@ -300,11 +271,64 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при обработке контакта: {e}")
 
-##########################
-# Основная функция
-##########################
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Добро пожаловать! Я виртуальный помощник лаборатории. Чем могу помочь?")
 
-def main():
+async def reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.message.chat.id) != ADMIN_TELEGRAM_ID:
+        return
+    try:
+        parts = update.message.text.split(" ", 2)
+        target_user = int(parts[1])
+        operator_reply = parts[2]
+        await context.bot.send_message(chat_id=target_user, text=operator_reply)
+        await update.message.reply_text("Ответ отправлен клиенту.")
+        pending_requests.pop(target_user, None)
+    except (IndexError, ValueError) as e:
+        logger.error(f"Ошибка в команде /reply: {e}")
+        await update.message.reply_text("Неправильный формат команды. Используйте: /reply <user_id> <ответ>")
+
+async def process_query(query, update, context):
+    """
+    Обрабатывает текстовый запрос (как из текстового сообщения, так и расшифрованного аудио).
+    """
+    user_id = update.message.chat.id
+    normalized_query = normalize_text(query)
+    logger.info(f"Запрос от {user_id}: {normalized_query}")
+    
+    if "сравнить" in normalized_query:
+        if user_id in pending_requests:
+            saved_names = pending_requests[user_id]
+            comp_response = compare_with_competitors(saved_names)
+            if "не найдена" in comp_response.lower():
+                await notify_admin_about_missing_request(saved_names, user_id, context)
+                comp_response += "\n\nИзвините, информация по конкурентам отсутствует. Запрос передан оператору."
+            await update.message.reply_text(comp_response)
+            return
+        else:
+            await update.message.reply_text("Нет предыдущего запроса для сравнения.")
+            return
+
+    analyses = get_all_analyses()
+    extracted_names = extract_matched_analyses(normalized_query, analyses)
+    if extracted_names:
+        pending_requests[user_id] = extracted_names
+    else:
+        pending_requests[user_id] = normalized_query
+
+    response = ask_openai(normalized_query, analyses)
+    final_response = await process_response(response, normalized_query, user_id, context)
+    
+    competitor_data = get_competitor_data()
+    if competitor_data:
+        final_response += "\n\nЕсли хотите сравнить цены с конкурентами, отправьте 'сравнить'."
+    
+    await update.message.reply_text(final_response)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_query(update.message.text, update, context)
+
+if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reply", reply))
@@ -314,6 +338,3 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен.")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
